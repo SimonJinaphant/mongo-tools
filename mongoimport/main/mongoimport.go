@@ -10,6 +10,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/mongodb/mongo-tools/common/db"
 	"github.com/mongodb/mongo-tools/common/log"
@@ -19,7 +20,13 @@ import (
 	"github.com/mongodb/mongo-tools/mongoimport"
 )
 
+func timeTrack(start time.Time, name string) {
+	elapsed := time.Since(start)
+	log.Logvf(log.Always, "%s took %s", name, elapsed)
+}
+
 func main() {
+	defer timeTrack(time.Now(), "main")
 	// initialize command-line opts
 	opts := options.New("mongoimport", mongoimport.Usage,
 		options.EnabledOptions{Auth: true, Connection: true, Namespace: true, URI: true})

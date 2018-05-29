@@ -39,12 +39,15 @@ func NewBufferedBulkInserter(collection *mgo.Collection, docLimit int,
 		continueOnError: continueOnError,
 		docLimit:        docLimit,
 	}
+	log.Logvf(log.Always, "Document Limit: %d", docLimit)
+	log.Logvf(log.Always, "Unordered: %t", bb.unordered)
 	bb.resetBulk()
 	return bb
 }
 
 func (bb *BufferedBulkInserter) Unordered() {
 	bb.unordered = true
+	log.Logvf(log.Always, "Unordered has changed to: %t", bb.unordered)
 	bb.bulk.Unordered()
 }
 
