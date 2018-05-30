@@ -383,6 +383,18 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 		}
 	}
 
+	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
+	errCosmosCol := collection.CreateCustomCosmosDB(&mgo.CosmosDBCollectionInfo{
+		Throughput: imp.IngestOptions.Throughput,
+		ShardKey:   imp.IngestOptions.ShardKey,
+	})
+	//TODO: Define scenario where we want to change the throughput of an existing collection...
+	if errCosmosCol != nil {
+		log.Logvf(log.Always, "Unable to create collection: %s", collection.Name)
+		return 0, errCosmosCol
+	}
+	log.Logvf(log.Always, "Throughput adjusted to %d!", imp.IngestOptions.Throughput)
+
 	readDocs := make(chan bson.D, workerBufferSize)
 	processingErrChan := make(chan error)
 	ordered := imp.IngestOptions.MaintainInsertionOrder

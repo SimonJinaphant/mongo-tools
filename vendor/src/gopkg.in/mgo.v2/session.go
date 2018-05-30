@@ -2856,6 +2856,29 @@ func (c *Collection) Create(info *CollectionInfo) error {
 	return c.Database.Run(cmd, nil)
 }
 
+// The CosmosDBCollectionInfo type holds metadata about a CosmosDB collection.
+type CosmosDBCollectionInfo struct {
+	ShardKey   string
+	Throughput int
+}
+
+// CreateCustomCosmosDB explicitly creates the c collection for
+// Azure CosmosDB, allowing the specification of throughput and shard keys
+func (c *Collection) CreateCustomCosmosDB(info *CosmosDBCollectionInfo) error {
+	cmd := make(bson.D, 0, 4)
+	cmd = append(cmd, bson.DocElem{"customAction", "CreateCollection"})
+	cmd = append(cmd, bson.DocElem{"collection", c.Name})
+
+	//TODO: Validate the throughput range for Fixed & Unlimited
+	cmd = append(cmd, bson.DocElem{"offerThroughput", info.Throughput})
+
+	//TODO: Validate the shardkey to be acceptable
+	if info.ShardKey != "" {
+		cmd = append(cmd, bson.DocElem{"shardKey", info.ShardKey})
+	}
+	return c.Database.Run(cmd, nil)
+}
+
 // Batch sets the batch size used when fetching documents from the database.
 // It's possible to change this setting on a per-session basis as well, using
 // the Batch method of Session.
