@@ -8,6 +8,10 @@ package db
 
 import (
 	"fmt"
+	"strings"
+	"time"
+
+	"github.com/mongodb/mongo-tools/common/log"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
 )
@@ -63,13 +67,41 @@ func (bb *BufferedBulkInserter) Insert(doc interface{}) error {
 	}
 	// flush if we are full
 	if bb.docCount >= bb.docLimit || bb.byteCount+len(rawBytes) > MaxBSONSize {
-		err = bb.Flush()
+		err = bb.FlushWithRetry()
 	}
 	// buffer the document
 	bb.docCount++
 	bb.byteCount += len(rawBytes)
 	bb.bulk.Insert(bson.Raw{Data: rawBytes})
 	return err
+}
+
+// FlushWithRetry continously writes all buffered documents in one bulk insert until there's no error then resets the buffer.
+func (bb *BufferedBulkInserter) FlushWithRetry() error {
+	failedInsertCount := 0
+	if bb.docCount == 0 {
+		return nil
+	}
+	defer bb.resetBulk()
+retry:
+	if _, err := bb.bulk.Run(); err != nil {
+		if strings.Contains(err.Error(), "Request rate is large") ||
+			strings.Contains(err.Error(), "The request rate is too large") ||
+			strings.Contains(err.Error(), "Partition key provided either doesn't correspond") {
+
+			failedInsertCount++
+			coolDownTime := 250 * failedInsertCount
+			log.Logvf(log.Always, "We're overloading Azure CosmosDB; let's wait %d milliseconds", coolDownTime)
+
+			cooldownTimer := time.NewTimer(time.Duration(coolDownTime) * time.Millisecond)
+			<-cooldownTimer.C
+
+			log.Logv(log.Always, "Retrying now!")
+			goto retry
+		}
+		return err
+	}
+	return nil
 }
 
 // Flush writes all buffered documents in one bulk insert then resets the buffer.
