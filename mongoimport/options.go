@@ -85,7 +85,14 @@ type IngestOptions struct {
 	// Specifies the number of threads to use in processing data read from the input source
 	NumDecodingWorkers int `long:"numDecodingWorkers" default:"0" hidden:"true"`
 
-	BulkBufferSize int `long:"batchSize" default:"400" hidden:"true"`
+	BulkBufferSize int `long:"batchSize" default:"1000" hidden:"true"`
+
+	// Indicate the amount of throughput to set the Azure CosmosDB collections to
+	Throughput int `short:"t" value-name:"<number>" long:"throughput" description:"Throughput to set on a CosmosDB collection" default:"3000"`
+
+	// Specify the Shard key for Azure CosmosDB to perform sharding with
+	ShardKey string `long:"shardKey" value-name:"<field>" description:"Shard key for CosmosDB; specifying this key will set the collection size to be 'Unlimited' instead of 'Fixed', which also raises the maximum RU from 10k to 50k"`
+>>>>>>> cosmosParams
 }
 
 // Name returns a description of the IngestOptions struct.
