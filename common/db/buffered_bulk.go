@@ -39,15 +39,12 @@ func NewBufferedBulkInserter(collection *mgo.Collection, docLimit int,
 		continueOnError: continueOnError,
 		docLimit:        docLimit,
 	}
-	log.Logvf(log.Always, "Document Limit: %d", docLimit)
-	log.Logvf(log.Always, "Unordered: %t", bb.unordered)
 	bb.resetBulk()
 	return bb
 }
 
 func (bb *BufferedBulkInserter) Unordered() {
 	bb.unordered = true
-	log.Logvf(log.Always, "Unordered has changed to: %t", bb.unordered)
 	bb.bulk.Unordered()
 }
 
@@ -94,12 +91,12 @@ retry:
 
 			failedInsertCount++
 			coolDownTime := 250 * failedInsertCount
-			log.Logvf(log.Always, "We're overloading CosmosDB; let's wait %d milliseconds", coolDownTime)
+			log.Logvf(log.Always, "We're overloading Azure CosmosDB; let's wait %d milliseconds", coolDownTime)
 
 			cooldownTimer := time.NewTimer(time.Duration(coolDownTime) * time.Millisecond)
 			<-cooldownTimer.C
 
-			log.Logv(log.Always, "Let's retry now!")
+			log.Logv(log.Always, "Retrying now!")
 			goto retry
 		}
 		return err

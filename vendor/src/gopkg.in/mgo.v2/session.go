@@ -2869,10 +2869,10 @@ func (c *Collection) CreateCustomCosmosDB(info *CosmosDBCollectionInfo) error {
 	cmd = append(cmd, bson.DocElem{"customAction", "CreateCollection"})
 	cmd = append(cmd, bson.DocElem{"collection", c.Name})
 
-	//TODO: Validate the throughput range for Fixed & Unlimited
+	//TODO: Validate the throughput range for Fixed & Unlimited collections
 	cmd = append(cmd, bson.DocElem{"offerThroughput", info.Throughput})
 
-	//TODO: Validate the shardkey to be acceptable
+	//TODO: Validate the shardkey to be in an acceptable format
 	if info.ShardKey != "" {
 		cmd = append(cmd, bson.DocElem{"shardKey", info.ShardKey})
 	}
