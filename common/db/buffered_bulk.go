@@ -88,7 +88,10 @@ func (bb *BufferedBulkInserter) FlushWithRetry() error {
 	defer bb.resetBulk()
 retry:
 	if _, err := bb.bulk.Run(); err != nil {
-		if strings.Contains(err.Error(), "Request rate is large") || strings.Contains(err.Error(), "The request rate is too large") {
+		if strings.Contains(err.Error(), "Request rate is large") ||
+			strings.Contains(err.Error(), "The request rate is too large") ||
+			strings.Contains(err.Error(), "Partition key provided either doesn't correspond") {
+
 			failedInsertCount++
 			coolDownTime := 250 * failedInsertCount
 			log.Logvf(log.Always, "We're overloading CosmosDB; let's wait %d milliseconds", coolDownTime)

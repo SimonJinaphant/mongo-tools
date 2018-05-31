@@ -92,7 +92,6 @@ type IngestOptions struct {
 
 	// Specify the Shard key for Azure CosmosDB to perform sharding with
 	ShardKey string `long:"shardKey" value-name:"<field>" description:"Shard key for CosmosDB; specifying this key will set the collection size to be 'Unlimited' instead of 'Fixed', which also raises the maximum RU from 10k to 50k"`
->>>>>>> cosmosParams
 }
 
 // Name returns a description of the IngestOptions struct.
