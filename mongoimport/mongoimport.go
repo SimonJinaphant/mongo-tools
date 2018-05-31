@@ -393,8 +393,6 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 		log.Logvf(log.Always, "Unable to create collection: %s", collection.Name)
 		return 0, errCosmosCol
 	}
-	log.Logvf(log.Always, "Throughput adjusted to %d!", imp.IngestOptions.Throughput)
-
 	readDocs := make(chan bson.D, workerBufferSize)
 	processingErrChan := make(chan error)
 	ordered := imp.IngestOptions.MaintainInsertionOrder
@@ -419,7 +417,6 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 // or more workers.
 func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
 	numInsertionWorkers := imp.IngestOptions.NumInsertionWorkers
-	log.Logvf(log.Always, "InsertionWorkers: %d", numInsertionWorkers)
 	if numInsertionWorkers <= 0 {
 		numInsertionWorkers = 1
 	}
@@ -560,8 +557,8 @@ func (up *upserter) Insert(doc interface{}) error {
 	return err
 }
 
-// Flush is needed so that upserter implements flushInserter, but upserter
-// doesn't buffer anything so we don't need to do anything in Flush.
+// FlushWithRetry is needed so that upserter implements flushInserter, but upserter
+// doesn't buffer anything so we don't need to do anything in FlushWithRetry.
 func (up *upserter) FlushWithRetry() error {
 	return nil
 }
