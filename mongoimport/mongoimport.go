@@ -628,3 +628,25 @@ func (imp *MongoImport) getInputReader(in io.Reader) (InputReader, error) {
 	}
 	return NewJSONInputReader(imp.InputOptions.JSONArray, in, imp.IngestOptions.NumDecodingWorkers), nil
 }
+
+func (imp *MongoImport) CleanUp() (int, error) {
+	session, err := imp.SessionProvider.GetSession()
+	if err != nil {
+		return 0, err
+	}
+	defer session.Close()
+
+	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
+	docCount, countErr := collection.Count()
+	if countErr != nil {
+		return 0, err
+	}
+	log.Logvf(log.Always, "Counted: %d documents in CosmosDB", docCount)
+
+	dropErr := collection.Database.DropDatabase()
+	if dropErr != nil {
+		return 0, err
+	}
+	log.Logv(log.Always, "Collection dropped success")
+	return 0, nil
+}
