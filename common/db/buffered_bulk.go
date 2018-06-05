@@ -85,19 +85,28 @@ func (bb *BufferedBulkInserter) FlushWithRetry() error {
 	defer bb.resetBulk()
 retry:
 	if _, err := bb.bulk.Run(); err != nil {
+		errMessage := ""
 		if strings.Contains(err.Error(), "Request rate is large") ||
-			strings.Contains(err.Error(), "The request rate is too large") ||
-			strings.Contains(err.Error(), "Partition key provided either doesn't correspond") {
-
+			strings.Contains(err.Error(), "The request rate is too large") {
+			errMessage = "We're overloading Cosmos DB"
+		}
+		if strings.Contains(err.Error(), "duplicate key error") ||
+			strings.Contains(err.Error(), "Partition key provided either doesn't correspond") ||
+			strings.Contains(err.Error(), "Partition key value must be supplied") {
+			errMessage = "Insert into sharded didn't work this time"
+		}
+		if errMessage != "" {
 			failedInsertCount++
 			coolDownTime := 250 * failedInsertCount
-			log.Logvf(log.Always, "We're overloading Azure CosmosDB; let's wait %d milliseconds", coolDownTime)
+			log.Logvf(log.Always, "%s; let's wait %d milliseconds", errMessage, coolDownTime)
 
 			cooldownTimer := time.NewTimer(time.Duration(coolDownTime) * time.Millisecond)
 			<-cooldownTimer.C
-
-			log.Logv(log.Always, "Retrying now!")
-			goto retry
+			if failedInsertCount > 30 {
+				log.Logv(log.Always, "Maximum retry exceeded; moving on")
+			} else {
+				goto retry
+			}
 		}
 		return err
 	}

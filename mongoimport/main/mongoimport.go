@@ -58,7 +58,9 @@ func main() {
 
 	// verify uri options and log them
 	opts.URI.LogUnsupportedOptions()
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 100; i++ {
+		log.Logvf(log.Always, "Import cycle: %d", i)
+
 		// create a session provider to connect to the db
 		sessionProvider, err := db.NewSessionProvider(*opts)
 		if err != nil {
@@ -97,7 +99,7 @@ func main() {
 		}
 		_, cerr := m.CleanUp()
 		if cerr != nil {
-			log.Logvf(log.Always, "Failed cleanup: %v", err)
+			log.Logvf(log.Always, "Failed to cleanup: %v", err)
 		}
 	}
 }

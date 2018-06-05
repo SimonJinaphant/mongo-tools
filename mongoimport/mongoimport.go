@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Input format types accepted by mongoimport.
@@ -388,6 +389,11 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 		Throughput: imp.IngestOptions.Throughput,
 		ShardKey:   imp.IngestOptions.ShardKey,
 	})
+
+	cooldownTimer := time.NewTimer(time.Duration(1) * time.Second)
+	<-cooldownTimer.C
+	log.Logv(log.Always, "Custom collection created")
+
 	//TODO: Define scenario where we want to change the throughput of an existing collection...
 	if errCosmosCol != nil {
 		log.Logvf(log.Always, "Unable to create collection: %s", collection.Name)
@@ -647,6 +653,6 @@ func (imp *MongoImport) CleanUp() (int, error) {
 	if dropErr != nil {
 		return 0, err
 	}
-	log.Logv(log.Always, "Collection dropped success")
+	log.Logv(log.Always, "Database dropped success")
 	return 0, nil
 }
