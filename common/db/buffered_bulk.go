@@ -89,11 +89,12 @@ retry:
 		if strings.Contains(err.Error(), "Request rate is large") ||
 			strings.Contains(err.Error(), "The request rate is too large") {
 			errMessage = "We're overloading Cosmos DB"
-		}
-		if strings.Contains(err.Error(), "duplicate key error") ||
-			strings.Contains(err.Error(), "Partition key provided either doesn't correspond") ||
-			strings.Contains(err.Error(), "PartitionKey value must be supplied") {
-			errMessage = "Insert into sharded didn't work this time"
+		} else if strings.Contains(err.Error(), "duplicate key error") {
+			errMessage = "There's a duplicate?"
+		} else if strings.Contains(err.Error(), "Partition key provided either doesn't correspond") {
+			errMessage = "PartitionKey does not seem to correspond"
+		} else if strings.Contains(err.Error(), "PartitionKey value must be supplied") {
+			errMessage = "ParitionKey must be supplied"
 		}
 		if errMessage != "" {
 			failedInsertCount++

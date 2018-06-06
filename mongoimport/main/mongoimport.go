@@ -10,6 +10,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/mongodb/mongo-tools/common/db"
 	"github.com/mongodb/mongo-tools/common/log"
@@ -19,13 +20,12 @@ import (
 	"github.com/mongodb/mongo-tools/mongoimport"
 )
 
-//func timeTrack(start time.Time, name string) {
-//	elapsed := time.Since(start)
-//	log.Logvf(log.Always, "%s took %s", name, elapsed)
-//}
+func timeTrack(start time.Time, name string) {
+	elapsed := time.Since(start)
+	log.Logvf(log.Always, "%s took %s", name, elapsed)
+}
 
 func main() {
-	//defer timeTrack(time.Now(), "main")
 	// initialize command-line opts
 	opts := options.New("mongoimport", mongoimport.Usage,
 		options.EnabledOptions{Auth: true, Connection: true, Namespace: true, URI: true})
@@ -58,48 +58,52 @@ func main() {
 
 	// verify uri options and log them
 	opts.URI.LogUnsupportedOptions()
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 1; i++ {
 		log.Logvf(log.Always, "Import cycle: %d", i)
+		importCycle(opts, inputOpts, ingestOpts, args)
+	}
+}
 
-		// create a session provider to connect to the db
-		sessionProvider, err := db.NewSessionProvider(*opts)
+func importCycle(opts *options.ToolOptions, inputOpts *mongoimport.InputOptions, ingestOpts *mongoimport.IngestOptions, args []string) {
+	defer timeTrack(time.Now(), "importCycle")
+	// create a session provider to connect to the db
+	sessionProvider, err := db.NewSessionProvider(*opts)
+	if err != nil {
+		log.Logvf(log.Always, "error connecting to host: %v", err)
+		os.Exit(util.ExitError)
+	}
+	defer sessionProvider.Close()
+	sessionProvider.SetBypassDocumentValidation(ingestOpts.BypassDocumentValidation)
+
+	m := mongoimport.MongoImport{
+		ToolOptions:     opts,
+		InputOptions:    inputOpts,
+		IngestOptions:   ingestOpts,
+		SessionProvider: sessionProvider,
+	}
+
+	if err = m.ValidateSettings(args); err != nil {
+		log.Logvf(log.Always, "error validating settings: %v", err)
+		log.Logvf(log.Always, "try 'mongoimport --help' for more information")
+		os.Exit(util.ExitError)
+	}
+
+	numDocs, err := m.ImportDocuments()
+	if !opts.Quiet {
 		if err != nil {
-			log.Logvf(log.Always, "error connecting to host: %v", err)
-			os.Exit(util.ExitError)
+			log.Logvf(log.Always, "Failed: %v", err)
 		}
-		defer sessionProvider.Close()
-		sessionProvider.SetBypassDocumentValidation(ingestOpts.BypassDocumentValidation)
-
-		m := mongoimport.MongoImport{
-			ToolOptions:     opts,
-			InputOptions:    inputOpts,
-			IngestOptions:   ingestOpts,
-			SessionProvider: sessionProvider,
+		message := fmt.Sprintf("imported 1 document")
+		if numDocs != 1 {
+			message = fmt.Sprintf("imported %v documents", numDocs)
 		}
-
-		if err = m.ValidateSettings(args); err != nil {
-			log.Logvf(log.Always, "error validating settings: %v", err)
-			log.Logvf(log.Always, "try 'mongoimport --help' for more information")
-			os.Exit(util.ExitError)
-		}
-
-		numDocs, err := m.ImportDocuments()
-		if !opts.Quiet {
-			if err != nil {
-				log.Logvf(log.Always, "Failed: %v", err)
-			}
-			message := fmt.Sprintf("imported 1 document")
-			if numDocs != 1 {
-				message = fmt.Sprintf("imported %v documents", numDocs)
-			}
-			log.Logvf(log.Always, message)
-		}
-		if err != nil {
-			os.Exit(util.ExitError)
-		}
-		_, cerr := m.CleanUp()
-		if cerr != nil {
-			log.Logvf(log.Always, "Failed to cleanup: %v", err)
-		}
+		log.Logvf(log.Always, message)
+	}
+	if err != nil {
+		os.Exit(util.ExitError)
+	}
+	_, cerr := m.CleanUp()
+	if cerr != nil {
+		log.Logvf(log.Always, "Failed to cleanup: %v", err)
 	}
 }
