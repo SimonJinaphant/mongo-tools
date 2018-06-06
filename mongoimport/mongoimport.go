@@ -474,9 +474,9 @@ func (imp *MongoImport) configureSession(session *mgo.Session) error {
 }
 
 type flushInserter interface {
-	Insert(doc interface{}) error
+	Insert(doc interface{}, session *mgo.Session) error
 	Flush() error
-	FlushWithRetry() error
+	FlushWithRetry(session *mgo.Session) error
 }
 
 // runInsertionWorker is a helper to InsertDocuments - it reads document off
@@ -509,7 +509,7 @@ readLoop:
 			if !alive {
 				break readLoop
 			}
-			err = filterIngestError(imp.IngestOptions.StopOnError, inserter.Insert(document))
+			err = filterIngestError(imp.IngestOptions.StopOnError, inserter.Insert(document, session))
 			if err != nil {
 				return err
 			}
@@ -519,7 +519,7 @@ readLoop:
 		}
 	}
 
-	err = inserter.FlushWithRetry()
+	err = inserter.FlushWithRetry(session)
 	// TOOLS-349 correct import count for bulk operations
 	if bulkError, ok := err.(*mgo.BulkError); ok {
 		failedDocs := make(map[int]bool) // index of failures
@@ -549,7 +549,7 @@ func (imp *MongoImport) newUpserter(collection *mgo.Collection) *upserter {
 
 // Insert is part of the flushInserter interface and performs
 // upserts or inserts.
-func (up *upserter) Insert(doc interface{}) error {
+func (up *upserter) Insert(doc interface{}, session *mgo.Session) error {
 	document := doc.(bson.D)
 	selector := constructUpsertDocument(up.imp.upsertFields, document)
 	var err error
@@ -565,7 +565,7 @@ func (up *upserter) Insert(doc interface{}) error {
 
 // FlushWithRetry is needed so that upserter implements flushInserter, but upserter
 // doesn't buffer anything so we don't need to do anything in FlushWithRetry.
-func (up *upserter) FlushWithRetry() error {
+func (up *upserter) FlushWithRetry(seassion *mgo.Session) error {
 	return nil
 }
 

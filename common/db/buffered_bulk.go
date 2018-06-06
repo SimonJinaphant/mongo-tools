@@ -60,14 +60,14 @@ func (bb *BufferedBulkInserter) resetBulk() {
 
 // Insert adds a document to the buffer for bulk insertion. If the buffer is
 // full, the bulk insert is made, returning any error that occurs.
-func (bb *BufferedBulkInserter) Insert(doc interface{}) error {
+func (bb *BufferedBulkInserter) Insert(doc interface{}, session *mgo.Session) error {
 	rawBytes, err := bson.Marshal(doc)
 	if err != nil {
 		return fmt.Errorf("bson encoding error: %v", err)
 	}
 	// flush if we are full
 	if bb.docCount >= bb.docLimit || bb.byteCount+len(rawBytes) > MaxBSONSize {
-		err = bb.FlushWithRetry()
+		err = bb.FlushWithRetry(session)
 	}
 	// buffer the document
 	bb.docCount++
@@ -77,14 +77,26 @@ func (bb *BufferedBulkInserter) Insert(doc interface{}) error {
 }
 
 // FlushWithRetry continously writes all buffered documents in one bulk insert until there's no error then resets the buffer.
-func (bb *BufferedBulkInserter) FlushWithRetry() error {
+func (bb *BufferedBulkInserter) FlushWithRetry(session *mgo.Session) error {
 	failedInsertCount := 0
+	resetCount := 0
 	if bb.docCount == 0 {
 		return nil
 	}
 	defer bb.resetBulk()
 retry:
 	if _, err := bb.bulk.Run(); err != nil {
+		if strings.Contains(err.Error(), "connection reset by peer") {
+			resetCount++
+			log.Logvf(log.Always, "Connection appears to be reset")
+			session.New()
+			if resetCount > 5 {
+				log.Logv(log.Always, "Maximum socket retry exceeded; moving on")
+				return err
+			}
+			goto retry
+
+		}
 		errMessage := ""
 		if strings.Contains(err.Error(), "Request rate is large") ||
 			strings.Contains(err.Error(), "The request rate is too large") {
