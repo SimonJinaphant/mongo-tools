@@ -92,7 +92,7 @@ retry:
 		}
 		if strings.Contains(err.Error(), "duplicate key error") ||
 			strings.Contains(err.Error(), "Partition key provided either doesn't correspond") ||
-			strings.Contains(err.Error(), "Partition key value must be supplied") {
+			strings.Contains(err.Error(), "PartitionKey value must be supplied") {
 			errMessage = "Insert into sharded didn't work this time"
 		}
 		if errMessage != "" {
