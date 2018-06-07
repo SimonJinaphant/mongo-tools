@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/globalsign/mgo"
+	"github.com/globalsign/mgo/bson"
 	"github.com/mongodb/mongo-tools/common/log"
-	"gopkg.in/mgo.v2"
-	"gopkg.in/mgo.v2/bson"
 )
 
 // BufferedBulkInserter implements a bufio.Writer-like design for queuing up

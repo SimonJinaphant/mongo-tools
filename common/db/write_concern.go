@@ -11,7 +11,7 @@ import (
 	"github.com/mongodb/mongo-tools/common/json"
 	"github.com/mongodb/mongo-tools/common/log"
 	"github.com/mongodb/mongo-tools/common/util"
-	"gopkg.in/mgo.v2"
+	"github.com/globalsign/mgo"
 
 	"fmt"
 	"strconv"

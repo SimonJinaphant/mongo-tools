@@ -7,8 +7,9 @@
 package util
 
 import (
-	"gopkg.in/mgo.v2/bson"
 	"reflect"
+
+	"github.com/globalsign/mgo/bson"
 )
 
 // IsTruthy returns true for values the server will interpret as "true".
