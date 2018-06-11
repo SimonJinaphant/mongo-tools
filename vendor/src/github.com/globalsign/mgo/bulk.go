@@ -155,9 +155,10 @@ func (b *Bulk) action(op bulkOp, opcount int) *bulkAction {
 		}
 	}
 	if action == nil {
-		a := actionPool.Get().(*bulkAction)
-		a.op = op
-		b.actions = append(b.actions, *a)
+		//a := actionPool.Get().(*bulkAction)
+		//a.op = op
+		//b.actions = append(b.actions, *a)
+		b.actions = append(b.actions, bulkAction{op: op})
 		action = &b.actions[len(b.actions)-1]
 	}
 	for i := 0; i < opcount; i++ {
@@ -300,9 +301,9 @@ func (b *Bulk) Run() (*BulkResult, error) {
 		default:
 			panic("unknown bulk operation")
 		}
-		action.idxs = action.idxs[0:0]
-		action.docs = action.docs[0:0]
-		actionPool.Put(action)
+		//action.idxs = action.idxs[0:0]
+		//action.docs = action.docs[0:0]
+		//actionPool.Put(action)
 		if !ok {
 			failed = true
 			if b.ordered {
