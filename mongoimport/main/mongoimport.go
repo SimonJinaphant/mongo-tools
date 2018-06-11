@@ -58,7 +58,7 @@ func main() {
 
 	// verify uri options and log them
 	opts.URI.LogUnsupportedOptions()
-	for i := 0; i < 1; i++ {
+	for i := 0; i < ingestOpts.ImportCycle; i++ {
 		log.Logvf(log.Always, "Import cycle: %d", i)
 		importCycle(opts, inputOpts, ingestOpts, args)
 	}
@@ -102,8 +102,11 @@ func importCycle(opts *options.ToolOptions, inputOpts *mongoimport.InputOptions,
 	if err != nil {
 		os.Exit(util.ExitError)
 	}
-	_, cerr := m.CleanUp()
-	if cerr != nil {
-		log.Logvf(log.Always, "Failed to cleanup: %v", err)
+
+	if ingestOpts.DropOnComplete {
+		_, cerr := m.CleanUp()
+		if cerr != nil {
+			log.Logvf(log.Always, "Failed to cleanup: %v", err)
+		}
 	}
 }
