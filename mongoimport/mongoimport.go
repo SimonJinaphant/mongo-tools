@@ -228,6 +228,11 @@ func (imp *MongoImport) ValidateSettings(args []string) error {
 		imp.IngestOptions.BulkBufferSize = 1000
 	}
 
+	// For testing purposes, make sure to drop the database if we're cycling
+	if imp.IngestOptions.ImportCycle > 1 {
+		imp.IngestOptions.DropOnComplete = true
+	}
+
 	// ensure no more than one positional argument is supplied
 	if len(args) > 1 {
 		return fmt.Errorf("only one positional argument is allowed")
