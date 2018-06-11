@@ -8,7 +8,7 @@ package db
 
 import (
 	"fmt"
-	"gopkg.in/mgo.v2/bson"
+	"github.com/globalsign/mgo/bson"
 	"io"
 )
 

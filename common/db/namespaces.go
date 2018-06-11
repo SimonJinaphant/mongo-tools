@@ -12,8 +12,8 @@ import (
 	"strings"
 
 	"github.com/mongodb/mongo-tools/common/log"
-	"gopkg.in/mgo.v2"
-	"gopkg.in/mgo.v2/bson"
+	"github.com/globalsign/mgo"
+	"github.com/globalsign/mgo/bson"
 )
 
 type CollectionInfo struct {

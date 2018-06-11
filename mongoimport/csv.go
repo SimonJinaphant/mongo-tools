@@ -12,7 +12,7 @@ import (
 	"io"
 
 	"github.com/mongodb/mongo-tools/mongoimport/csv"
-	"gopkg.in/mgo.v2/bson"
+	"github.com/globalsign/mgo/bson"
 )
 
 // CSVInputReader implements the InputReader interface for CSV input types.

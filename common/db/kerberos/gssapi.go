@@ -12,7 +12,7 @@ package kerberos
 
 import (
 	"github.com/mongodb/mongo-tools/common/options"
-	"gopkg.in/mgo.v2"
+	"github.com/globalsign/mgo"
 )
 
 const authMechanism = "GSSAPI"

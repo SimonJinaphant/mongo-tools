@@ -8,13 +8,13 @@
 package mongoimport
 
 import (
+	"github.com/globalsign/mgo"
+	"github.com/globalsign/mgo/bson"
 	"github.com/mongodb/mongo-tools/common/db"
 	"github.com/mongodb/mongo-tools/common/log"
 	"github.com/mongodb/mongo-tools/common/options"
 	"github.com/mongodb/mongo-tools/common/progress"
 	"github.com/mongodb/mongo-tools/common/util"
-	"gopkg.in/mgo.v2"
-	"gopkg.in/mgo.v2/bson"
 	"gopkg.in/tomb.v2"
 
 	"fmt"
@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Input format types accepted by mongoimport.
@@ -383,6 +384,21 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 		}
 	}
 
+	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
+	errCosmosCol := collection.CreateCustomCosmosDB(&mgo.CosmosDBCollectionInfo{
+		Throughput: imp.IngestOptions.Throughput,
+		ShardKey:   imp.IngestOptions.ShardKey,
+	})
+
+	cooldownTimer := time.NewTimer(time.Duration(1) * time.Second)
+	<-cooldownTimer.C
+	log.Logv(log.Always, "Custom collection created")
+
+	//TODO: Define scenario where we want to change the throughput of an existing collection...
+	if errCosmosCol != nil {
+		log.Logvf(log.Always, "Unable to create collection: %s", collection.Name)
+		return 0, errCosmosCol
+	}
 	readDocs := make(chan bson.D, workerBufferSize)
 	processingErrChan := make(chan error)
 	ordered := imp.IngestOptions.MaintainInsertionOrder
@@ -460,6 +476,7 @@ func (imp *MongoImport) configureSession(session *mgo.Session) error {
 type flushInserter interface {
 	Insert(doc interface{}) error
 	Flush() error
+	FlushWithRetry() error
 }
 
 // runInsertionWorker is a helper to InsertDocuments - it reads document off
@@ -502,7 +519,7 @@ readLoop:
 		}
 	}
 
-	err = inserter.Flush()
+	err = inserter.FlushWithRetry()
 	// TOOLS-349 correct import count for bulk operations
 	if bulkError, ok := err.(*mgo.BulkError); ok {
 		failedDocs := make(map[int]bool) // index of failures
@@ -544,6 +561,12 @@ func (up *upserter) Insert(doc interface{}) error {
 		_, err = up.collection.Upsert(selector, bson.M{"$set": document})
 	}
 	return err
+}
+
+// FlushWithRetry is needed so that upserter implements flushInserter, but upserter
+// doesn't buffer anything so we don't need to do anything in FlushWithRetry.
+func (up *upserter) FlushWithRetry() error {
+	return nil
 }
 
 // Flush is needed so that upserter implements flushInserter, but upserter
@@ -610,4 +633,26 @@ func (imp *MongoImport) getInputReader(in io.Reader) (InputReader, error) {
 		return NewTSVInputReader(colSpecs, in, out, imp.IngestOptions.NumDecodingWorkers, ignoreBlanks), nil
 	}
 	return NewJSONInputReader(imp.InputOptions.JSONArray, in, imp.IngestOptions.NumDecodingWorkers), nil
+}
+
+func (imp *MongoImport) CleanUp() (int, error) {
+	session, err := imp.SessionProvider.GetSession()
+	if err != nil {
+		return 0, err
+	}
+	defer session.Close()
+
+	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
+	docCount, countErr := collection.Count()
+	if countErr != nil {
+		return 0, err
+	}
+	log.Logvf(log.Always, "Counted: %d documents in CosmosDB", docCount)
+
+	dropErr := collection.Database.DropDatabase()
+	if dropErr != nil {
+		return 0, err
+	}
+	log.Logv(log.Always, "Database dropped success")
+	return 0, nil
 }
