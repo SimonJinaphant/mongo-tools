@@ -8,13 +8,13 @@
 package mongoimport
 
 import (
+	"github.com/globalsign/mgo"
+	"github.com/globalsign/mgo/bson"
 	"github.com/mongodb/mongo-tools/common/db"
 	"github.com/mongodb/mongo-tools/common/log"
 	"github.com/mongodb/mongo-tools/common/options"
 	"github.com/mongodb/mongo-tools/common/progress"
 	"github.com/mongodb/mongo-tools/common/util"
-	"github.com/globalsign/mgo"
-	"github.com/globalsign/mgo/bson"
 	"gopkg.in/tomb.v2"
 
 	"fmt"
@@ -474,9 +474,9 @@ func (imp *MongoImport) configureSession(session *mgo.Session) error {
 }
 
 type flushInserter interface {
-	Insert(doc interface{}, session *mgo.Session) error
+	Insert(doc interface{}) error
 	Flush() error
-	FlushWithRetry(session *mgo.Session) error
+	FlushWithRetry() error
 }
 
 // runInsertionWorker is a helper to InsertDocuments - it reads document off
@@ -509,7 +509,7 @@ readLoop:
 			if !alive {
 				break readLoop
 			}
-			err = filterIngestError(imp.IngestOptions.StopOnError, inserter.Insert(document, session))
+			err = filterIngestError(imp.IngestOptions.StopOnError, inserter.Insert(document))
 			if err != nil {
 				return err
 			}
@@ -519,7 +519,7 @@ readLoop:
 		}
 	}
 
-	err = inserter.FlushWithRetry(session)
+	err = inserter.FlushWithRetry()
 	// TOOLS-349 correct import count for bulk operations
 	if bulkError, ok := err.(*mgo.BulkError); ok {
 		failedDocs := make(map[int]bool) // index of failures
@@ -549,7 +549,7 @@ func (imp *MongoImport) newUpserter(collection *mgo.Collection) *upserter {
 
 // Insert is part of the flushInserter interface and performs
 // upserts or inserts.
-func (up *upserter) Insert(doc interface{}, session *mgo.Session) error {
+func (up *upserter) Insert(doc interface{}) error {
 	document := doc.(bson.D)
 	selector := constructUpsertDocument(up.imp.upsertFields, document)
 	var err error
@@ -565,7 +565,7 @@ func (up *upserter) Insert(doc interface{}, session *mgo.Session) error {
 
 // FlushWithRetry is needed so that upserter implements flushInserter, but upserter
 // doesn't buffer anything so we don't need to do anything in FlushWithRetry.
-func (up *upserter) FlushWithRetry(seassion *mgo.Session) error {
+func (up *upserter) FlushWithRetry() error {
 	return nil
 }
 
