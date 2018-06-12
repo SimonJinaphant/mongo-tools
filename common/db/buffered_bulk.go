@@ -84,13 +84,24 @@ func (bb *BufferedBulkInserter) FlushWithRetry() error {
 	}
 	defer bb.resetBulk()
 retry:
-	if _, err := bb.bulk.Run(); err != nil {
+	_, err := bb.bulk.Run()
+
+	if err != nil {
+		if strings.Contains(err.Error(), "duplicate key error") {
+			//log.Logv(log.Always, "Duplicate reported; attempting to decompose")
+			derr := bb.bulk.Decompose()
+			if derr != nil {
+				log.Logvf(log.Always, "Failed to rerun: %v", derr)
+				return derr
+			}
+			//log.Logv(log.Always, "Completing decompose")
+			return nil
+		}
+
 		errMessage := ""
 		if strings.Contains(err.Error(), "Request rate is large") ||
 			strings.Contains(err.Error(), "The request rate is too large") {
 			errMessage = "We're overloading Cosmos DB"
-		} else if strings.Contains(err.Error(), "duplicate key error") {
-			errMessage = "There's a duplicate?"
 		} else if strings.Contains(err.Error(), "Partition key provided either doesn't correspond") {
 			errMessage = "PartitionKey does not seem to correspond"
 		} else if strings.Contains(err.Error(), "PartitionKey value must be supplied") {
@@ -109,6 +120,7 @@ retry:
 				goto retry
 			}
 		}
+
 		return err
 	}
 	return nil
