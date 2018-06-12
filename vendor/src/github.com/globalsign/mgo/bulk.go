@@ -29,6 +29,7 @@ type Bulk struct {
 	opcount int
 	actions []bulkAction
 	ordered bool
+	mtx     *sync.Mutex
 }
 
 type bulkOp int
@@ -132,7 +133,7 @@ var actionPool = sync.Pool{
 
 // Bulk returns a value to prepare the execution of a bulk operation.
 func (c *Collection) Bulk() *Bulk {
-	return &Bulk{c: c, ordered: true}
+	return &Bulk{c: c, ordered: true, mtx: &sync.Mutex{}}
 }
 
 // Unordered puts the bulk operation in unordered mode.
@@ -172,8 +173,10 @@ func (b *Bulk) action(op bulkOp, opcount int) *bulkAction {
 
 // Insert queues up the provided documents for insertion.
 func (b *Bulk) Insert(docs ...interface{}) {
+	b.mtx.Lock()
 	action := b.action(bulkInsert, len(docs))
 	action.docs = append(action.docs, docs...)
+	b.mtx.Unlock()
 }
 
 // Remove queues up the provided selectors for removing matching documents.
@@ -379,6 +382,7 @@ func (b *Bulk) checkSuccess(action *bulkAction, berr *BulkError, lerr *LastError
 // bulk insert fails, but some documents in the bulk where successfully inserted,
 // causing a duplicate key on a retry with the bulk again.
 func (b *Bulk) Decompose() bool {
+	b.mtx.Lock()
 	for _, action := range b.actions {
 		if action.op == bulkInsert {
 			for _, doc := range action.docs {
@@ -389,5 +393,7 @@ func (b *Bulk) Decompose() bool {
 			}
 		}
 	}
+	b.actions = b.actions[0:0]
+	b.mtx.Unlock()
 	return true
 }

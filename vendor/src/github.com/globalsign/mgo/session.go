@@ -45,6 +45,7 @@ import (
 	"time"
 
 	"github.com/globalsign/mgo/bson"
+	logger "github.com/mongodb/mongo-tools/common/log"
 )
 
 // Mode read preference mode. See Eventual, Monotonic and Strong for details
@@ -5151,14 +5152,13 @@ retry:
 			failedInsertCount++
 			coolDownTime := 250 * failedInsertCount
 
-			fmt.Printf("Overloading Cosmos DB; let's wait %d milliseconds\n", coolDownTime)
+			//logger.Logvf(logger.Always, "We're overloading Cosmos DB; let's wait %d milliseconds", coolDownTime)
 
 			cooldownTimer := time.NewTimer(time.Duration(coolDownTime) * time.Millisecond)
 			<-cooldownTimer.C
 
 			if failedInsertCount > 10 {
-
-				fmt.Printf("Maximum retry exceeded; moving on\n")
+				logger.Logvf(logger.Always, "Maximum retry exceeded; moving on")
 			} else {
 				goto retry
 			}
@@ -5168,7 +5168,7 @@ retry:
 			}
 
 		} else {
-			fmt.Printf("Unknown err case: %s\n", err)
+			logger.Logvf(logger.Always, "Unknown err case: %s", err)
 		}
 
 		return lerr, err
