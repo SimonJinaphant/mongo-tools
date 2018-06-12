@@ -2845,7 +2845,8 @@ func IsDup(err error) bool {
 	return false
 }
 
-func (c *Collection) InsertWithRetry(docs ...interface{}) error {
+// InsertIgnoreDuplicates does an normal insert and ignores duplicate key errors
+func (c *Collection) InsertIgnoreDuplicates(docs ...interface{}) error {
 	_, err := c.RetryableWriteOp(&insertOp{c.FullName, docs, 0}, true, true)
 	return err
 }
@@ -5138,10 +5139,12 @@ func (r *writeCmdResult) BulkErrorCases() []BulkErrorCase {
 	return ecases
 }
 
+// RetryableWriteOp will retry a normal write operation upon receiving a "recoverable" error
 func (c *Collection) RetryableWriteOp(op interface{}, ordered bool, ignoreDup bool) (lerr *LastError, err error) {
 	failedInsertCount := 0
 retry:
 	lerr, err = c.writeOp(op, ordered)
+	// TODO: Find a better way to match error aside from string matching; lerr is nil and thus we cannot get the Error code
 	if err != nil {
 		if strings.Contains(err.Error(), "Request rate is large") ||
 			strings.Contains(err.Error(), "The request rate is too large") {

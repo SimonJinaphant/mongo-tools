@@ -374,11 +374,15 @@ func (b *Bulk) checkSuccess(action *bulkAction, berr *BulkError, lerr *LastError
 	return true
 }
 
+// Decompose breaks down all insert operations current in the Bulk and inserts them
+// one by one via InsertIgnoreDuplicate; this is a workaround in the scenario where a
+// bulk insert fails, but some documents in the bulk where successfully inserted,
+// causing a duplicate key on a retry with the bulk again.
 func (b *Bulk) Decompose() bool {
 	for _, action := range b.actions {
 		if action.op == bulkInsert {
 			for _, doc := range action.docs {
-				if err := b.c.InsertWithRetry(doc); err != nil {
+				if err := b.c.InsertIgnoreDuplicates(doc); err != nil {
 					fmt.Printf("Failed to insert decomposed documents: %v\n", err)
 					return false
 				}
