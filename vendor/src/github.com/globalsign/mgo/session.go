@@ -5146,20 +5146,20 @@ func (c *Collection) RetryableWriteOp(op interface{}, ordered bool, ignoreDup bo
 	failedDupCount := 0
 retry:
 	lerr, err = c.writeOp(op, ordered)
-	// TODO: Find a better way to match error aside from string matching; lerr is nil and thus we cannot get the Error code
+	// TODO: Find a better way to match error aside from string matching; @lerr is nil and thus we cannot get the Error code
 	if err != nil {
 		if strings.Contains(err.Error(), "Request rate is large") ||
-			strings.Contains(err.Error(), "The request rate is too large") {
+			strings.Contains(err.Error(), "The request rate is too large") ||
+			strings.Contains(err.Error(), "timed out") {
 			failedInsertCount++
 			coolDownTime := 250 * failedInsertCount
-
 			//logger.Logvf(logger.Always, "We're overloading Cosmos DB; let's wait %d milliseconds", coolDownTime)
 
 			cooldownTimer := time.NewTimer(time.Duration(coolDownTime) * time.Millisecond)
 			<-cooldownTimer.C
 
 			if failedInsertCount > 10 {
-				logger.Logvf(logger.Always, "Maximum retry exceeded; moving on")
+				logger.Logvf(logger.Always, "Maximum throughput retry exceeded; moving on")
 			} else {
 				goto retry
 			}
@@ -5177,7 +5177,7 @@ retry:
 			<-cooldownTimer.C
 
 			if failedDupCount > 5 {
-				//logger.Logvf(logger.Always, "Maximum %t duplicate retry exceeded; moving on", ignoreDup)
+				//logger.Logvf(logger.Always, "Maximum duplicate retries exceeded (ignoreDup: %t)", ignoreDup)
 			} else {
 				goto retry
 			}
@@ -5187,6 +5187,9 @@ retry:
 		}
 
 		return lerr, err
+	}
+	if failedDupCount != 0 {
+		logger.Logvf(logger.Always, "A recoverable dup key has been resolved in %d tries", failedDupCount)
 	}
 	return nil, nil
 }
