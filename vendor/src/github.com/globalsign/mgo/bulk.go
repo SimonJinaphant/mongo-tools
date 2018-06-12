@@ -147,6 +147,10 @@ func (b *Bulk) Unordered() {
 
 func (b *Bulk) action(op bulkOp, opcount int) *bulkAction {
 	var action *bulkAction
+
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
+
 	if len(b.actions) > 0 && b.actions[len(b.actions)-1].op == op {
 		action = &b.actions[len(b.actions)-1]
 	} else if !b.ordered {
@@ -173,10 +177,8 @@ func (b *Bulk) action(op bulkOp, opcount int) *bulkAction {
 
 // Insert queues up the provided documents for insertion.
 func (b *Bulk) Insert(docs ...interface{}) {
-	b.mtx.Lock()
 	action := b.action(bulkInsert, len(docs))
 	action.docs = append(action.docs, docs...)
-	b.mtx.Unlock()
 }
 
 // Remove queues up the provided selectors for removing matching documents.
@@ -293,6 +295,7 @@ func (b *Bulk) Run() (*BulkResult, error) {
 	var result BulkResult
 	var berr BulkError
 	var failed bool
+
 	for i := range b.actions {
 		action := &b.actions[i]
 		var ok bool
@@ -383,17 +386,22 @@ func (b *Bulk) checkSuccess(action *bulkAction, berr *BulkError, lerr *LastError
 // causing a duplicate key on a retry with the bulk again.
 func (b *Bulk) Decompose() bool {
 	b.mtx.Lock()
+	var recovered []interface{}
 	for _, action := range b.actions {
 		if action.op == bulkInsert {
 			for _, doc := range action.docs {
-				if err := b.c.InsertIgnoreDuplicates(doc); err != nil {
-					fmt.Printf("Failed to insert decomposed documents: %v\n", err)
-					return false
-				}
+				recovered = append(recovered, doc)
 			}
 		}
 	}
 	b.actions = b.actions[0:0]
 	b.mtx.Unlock()
+
+	for _, doc := range recovered {
+		if err := b.c.InsertIgnoreDuplicates(doc); err != nil {
+			fmt.Printf("Failed to insert decomposed documents: %v\n", err)
+			return false
+		}
+	}
 	return true
 }

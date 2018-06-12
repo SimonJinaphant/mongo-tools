@@ -5143,6 +5143,7 @@ func (r *writeCmdResult) BulkErrorCases() []BulkErrorCase {
 // RetryableWriteOp will retry a normal write operation upon receiving a "recoverable" error
 func (c *Collection) RetryableWriteOp(op interface{}, ordered bool, ignoreDup bool) (lerr *LastError, err error) {
 	failedInsertCount := 0
+	failedDupCount := 0
 retry:
 	lerr, err = c.writeOp(op, ordered)
 	// TODO: Find a better way to match error aside from string matching; lerr is nil and thus we cannot get the Error code
@@ -5165,6 +5166,20 @@ retry:
 		} else if strings.Contains(err.Error(), "duplicate key") {
 			if ignoreDup {
 				return nil, nil
+			}
+
+			failedDupCount++
+			coolDownTime := 50 * failedDupCount
+
+			//logger.Logvf(logger.Always, "%t Duplicate key?; let's wait %d milliseconds", ignoreDup, coolDownTime)
+
+			cooldownTimer := time.NewTimer(time.Duration(coolDownTime) * time.Millisecond)
+			<-cooldownTimer.C
+
+			if failedDupCount > 5 {
+				//logger.Logvf(logger.Always, "Maximum %t duplicate retry exceeded; moving on", ignoreDup)
+			} else {
+				goto retry
 			}
 
 		} else {
