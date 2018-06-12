@@ -2845,6 +2845,11 @@ func IsDup(err error) bool {
 	return false
 }
 
+func (c *Collection) InsertWithRetry(docs ...interface{}) error {
+	_, err := c.RetryableWriteOp(&insertOp{c.FullName, docs, 0}, true, true)
+	return err
+}
+
 // Insert inserts one or more documents in the respective collection.  In
 // case the session is in safe mode (see the SetSafe method) and an error
 // happens while inserting the provided documents, the returned error will
@@ -5131,6 +5136,41 @@ func (r *writeCmdResult) BulkErrorCases() []BulkErrorCase {
 		ecases[i] = BulkErrorCase{err.Index, &QueryError{Code: err.Code, Message: err.ErrMsg}}
 	}
 	return ecases
+}
+
+func (c *Collection) RetryableWriteOp(op interface{}, ordered bool, ignoreDup bool) (lerr *LastError, err error) {
+	failedInsertCount := 0
+retry:
+	lerr, err = c.writeOp(op, ordered)
+	if err != nil {
+		if strings.Contains(err.Error(), "Request rate is large") ||
+			strings.Contains(err.Error(), "The request rate is too large") {
+			failedInsertCount++
+			coolDownTime := 250 * failedInsertCount
+
+			fmt.Printf("Overloading Cosmos DB; let's wait %d milliseconds\n", coolDownTime)
+
+			cooldownTimer := time.NewTimer(time.Duration(coolDownTime) * time.Millisecond)
+			<-cooldownTimer.C
+
+			if failedInsertCount > 10 {
+
+				fmt.Printf("Maximum retry exceeded; moving on\n")
+			} else {
+				goto retry
+			}
+		} else if strings.Contains(err.Error(), "duplicate key") {
+			if ignoreDup {
+				return nil, nil
+			}
+
+		} else {
+			fmt.Printf("Unknown err case: %s\n", err)
+		}
+
+		return lerr, err
+	}
+	return nil, nil
 }
 
 // writeOp runs the given modifying operation, potentially followed up

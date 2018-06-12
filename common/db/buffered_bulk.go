@@ -8,12 +8,9 @@ package db
 
 import (
 	"fmt"
-	"strings"
-	"time"
 
 	"github.com/globalsign/mgo"
 	"github.com/globalsign/mgo/bson"
-	"github.com/mongodb/mongo-tools/common/log"
 )
 
 // BufferedBulkInserter implements a bufio.Writer-like design for queuing up
@@ -67,63 +64,13 @@ func (bb *BufferedBulkInserter) Insert(doc interface{}) error {
 	}
 	// flush if we are full
 	if bb.docCount >= bb.docLimit || bb.byteCount+len(rawBytes) > MaxBSONSize {
-		err = bb.FlushWithRetry()
+		err = bb.Flush()
 	}
 	// buffer the document
 	bb.docCount++
 	bb.byteCount += len(rawBytes)
 	bb.bulk.Insert(bson.Raw{Data: rawBytes})
 	return err
-}
-
-// FlushWithRetry continously writes all buffered documents in one bulk insert until there's no error then resets the buffer.
-func (bb *BufferedBulkInserter) FlushWithRetry() error {
-	failedInsertCount := 0
-	if bb.docCount == 0 {
-		return nil
-	}
-	defer bb.resetBulk()
-retry:
-	_, err := bb.bulk.Run()
-
-	if err != nil {
-		if strings.Contains(err.Error(), "duplicate key error") {
-			//log.Logv(log.Always, "Duplicate reported; attempting to decompose")
-			derr := bb.bulk.Decompose()
-			if derr != nil {
-				log.Logvf(log.Always, "Failed to rerun: %v", derr)
-				return derr
-			}
-			//log.Logv(log.Always, "Completing decompose")
-			return nil
-		}
-
-		errMessage := ""
-		if strings.Contains(err.Error(), "Request rate is large") ||
-			strings.Contains(err.Error(), "The request rate is too large") {
-			errMessage = "We're overloading Cosmos DB"
-		} else if strings.Contains(err.Error(), "Partition key provided either doesn't correspond") {
-			errMessage = "PartitionKey does not seem to correspond"
-		} else if strings.Contains(err.Error(), "PartitionKey value must be supplied") {
-			errMessage = "ParitionKey must be supplied"
-		}
-		if errMessage != "" {
-			failedInsertCount++
-			coolDownTime := 250 * failedInsertCount
-			log.Logvf(log.Always, "%s; let's wait %d milliseconds", errMessage, coolDownTime)
-
-			cooldownTimer := time.NewTimer(time.Duration(coolDownTime) * time.Millisecond)
-			<-cooldownTimer.C
-			if failedInsertCount > 30 {
-				log.Logv(log.Always, "Maximum retry exceeded; moving on")
-			} else {
-				goto retry
-			}
-		}
-
-		return err
-	}
-	return nil
 }
 
 // Flush writes all buffered documents in one bulk insert then resets the buffer.

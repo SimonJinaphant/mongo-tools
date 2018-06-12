@@ -6,7 +6,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/globalsign/mgo/bson"
 )
@@ -326,7 +325,13 @@ func (b *Bulk) runInsert(action *bulkAction, result *BulkResult, berr *BulkError
 	if !b.ordered {
 		op.flags = 1 // ContinueOnError
 	}
-	lerr, err := b.c.writeOp(op, b.ordered)
+	lerr, err := b.c.RetryableWriteOp(op, b.ordered, false)
+	if err != nil {
+		if strings.Contains(err.Error(), "duplicate key") {
+			return b.Decompose()
+		}
+	}
+
 	return b.checkSuccess(action, berr, lerr, err)
 }
 
@@ -369,49 +374,16 @@ func (b *Bulk) checkSuccess(action *bulkAction, berr *BulkError, lerr *LastError
 	return true
 }
 
-func (b *Bulk) Decompose() error {
+func (b *Bulk) Decompose() bool {
 	for _, action := range b.actions {
-		switch action.op {
-		case bulkInsert:
-			documents := action.docs
-
-			for _, doc := range documents {
-				failedInsertCount := 0
-				errMessage := ""
-			retry:
-				ierr := b.c.Insert(doc)
-				if ierr != nil {
-					if strings.Contains(ierr.Error(), "duplicate key") {
-						continue
-					}
-					if strings.Contains(ierr.Error(), "Request rate is large") ||
-						strings.Contains(ierr.Error(), "The request rate is too large") {
-						errMessage = "Decomp: We're overloading Cosmos DB"
-					} else if strings.Contains(ierr.Error(), "Partition key provided either doesn't correspond") {
-						errMessage = "Decomp: PartitionKey does not seem to correspond"
-					} else if strings.Contains(ierr.Error(), "PartitionKey value must be supplied") {
-						errMessage = "Decomp: ParitionKey must be supplied"
-					}
-					if errMessage != "" {
-						failedInsertCount++
-						coolDownTime := 250 * failedInsertCount
-						fmt.Printf("%s; let's wait %d milliseconds\n", errMessage, coolDownTime)
-
-						cooldownTimer := time.NewTimer(time.Duration(coolDownTime) * time.Millisecond)
-						<-cooldownTimer.C
-						if failedInsertCount > 30 {
-							fmt.Printf("Maximum retry exceeded; moving on\n")
-						} else {
-							goto retry
-						}
-					}
-					return ierr
-
+		if action.op == bulkInsert {
+			for _, doc := range action.docs {
+				if err := b.c.InsertWithRetry(doc); err != nil {
+					fmt.Printf("Failed to insert decomposed documents: %v\n", err)
+					return false
 				}
 			}
-		default:
-			fmt.Printf("Non-insert found in bulk: %v\n", action.op)
 		}
 	}
-	return nil
+	return true
 }
