@@ -5153,15 +5153,16 @@ retry:
 			strings.Contains(err.Error(), "The request rate is too large") ||
 			strings.Contains(err.Error(), "timed out") ||
 			strings.Contains(err.Error(), "Partition key provided") ||
-			strings.Contains(err.Error(), "PartitionKey value must be supplied") {
+			strings.Contains(err.Error(), "PartitionKey value must be supplied") ||
+			strings.Contains(err.Error(), "exceeded maximum alloted time") {
 			failedInsertCount++
 			coolDownTime := 250 * failedInsertCount
-			//logger.Logvf(logger.Always, "We're overloading Cosmos DB; let's wait %d milliseconds", coolDownTime)
+			logger.Logvf(logger.Always, "We're overloading Cosmos DB; let's wait %d milliseconds", coolDownTime)
 
 			cooldownTimer := time.NewTimer(time.Duration(coolDownTime) * time.Millisecond)
 			<-cooldownTimer.C
 
-			if failedInsertCount > 10 {
+			if failedInsertCount > 15 {
 				logger.Logvf(logger.Always, "Maximum throughput retry exceeded; moving on")
 			} else {
 				goto retry
