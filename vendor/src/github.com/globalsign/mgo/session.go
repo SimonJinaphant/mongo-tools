@@ -5147,10 +5147,13 @@ func (c *Collection) RetryableWriteOp(op interface{}, ordered bool, ignoreDup bo
 retry:
 	lerr, err = c.writeOp(op, ordered)
 	// TODO: Find a better way to match error aside from string matching; @lerr is nil and thus we cannot get the Error code
+	// NOTE: Inserting with many workers on a Fixed unsharded collection gets recoverable "Partition key" errors
 	if err != nil {
 		if strings.Contains(err.Error(), "Request rate is large") ||
 			strings.Contains(err.Error(), "The request rate is too large") ||
-			strings.Contains(err.Error(), "timed out") {
+			strings.Contains(err.Error(), "timed out") ||
+			strings.Contains(err.Error(), "Partition key provided") ||
+			strings.Contains(err.Error(), "PartitionKey value must be supplied") {
 			failedInsertCount++
 			coolDownTime := 250 * failedInsertCount
 			//logger.Logvf(logger.Always, "We're overloading Cosmos DB; let's wait %d milliseconds", coolDownTime)
