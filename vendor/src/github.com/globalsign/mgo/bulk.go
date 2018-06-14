@@ -27,7 +27,6 @@ type Bulk struct {
 	opcount int
 	actions []bulkAction
 	ordered bool
-	mtx     *sync.Mutex
 }
 
 type bulkOp int
@@ -131,7 +130,7 @@ var actionPool = sync.Pool{
 
 // Bulk returns a value to prepare the execution of a bulk operation.
 func (c *Collection) Bulk() *Bulk {
-	return &Bulk{c: c, ordered: true, mtx: &sync.Mutex{}}
+	return &Bulk{c: c, ordered: true}
 }
 
 // Unordered puts the bulk operation in unordered mode.
@@ -145,10 +144,6 @@ func (b *Bulk) Unordered() {
 
 func (b *Bulk) action(op bulkOp, opcount int) *bulkAction {
 	var action *bulkAction
-
-	b.mtx.Lock()
-	defer b.mtx.Unlock()
-
 	if len(b.actions) > 0 && b.actions[len(b.actions)-1].op == op {
 		action = &b.actions[len(b.actions)-1]
 	} else if !b.ordered {
@@ -371,30 +366,3 @@ func (b *Bulk) checkSuccess(action *bulkAction, berr *BulkError, lerr *LastError
 	}
 	return true
 }
-
-// Decompose breaks down all insert operations current in the Bulk and inserts them
-// one by one via InsertIgnoreDuplicate; this is a workaround in the scenario where a
-// bulk insert fails, but some documents in the bulk where successfully inserted,
-// causing a duplicate key on a retry with the bulk again.
-/*func (b *Bulk) Decompose() bool {
-	b.mtx.Lock()
-	var recovered []interface{}
-	for _, action := range b.actions {
-		if action.op == bulkInsert {
-			for _, doc := range action.docs {
-				recovered = append(recovered, doc)
-			}
-		}
-	}
-	b.actions = b.actions[0:0]
-	b.mtx.Unlock()
-
-	for _, doc := range recovered {
-		if err := b.c.InsertIgnoreDuplicates(doc); err != nil {
-			fmt.Printf("Failed to insert decomposed documents: %v\n", err)
-			return false
-		}
-	}
-	return true
-}
-*/
