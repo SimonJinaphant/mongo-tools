@@ -2846,12 +2846,6 @@ func IsDup(err error) bool {
 	return false
 }
 
-// InsertIgnoreDuplicates does an normal insert and ignores duplicate key errors
-func (c *Collection) InsertIgnoreDuplicates(docs ...interface{}) error {
-	_, err := c.RetryableWriteOp(&insertOp{c.FullName, docs, 0}, true, true)
-	return err
-}
-
 // Insert inserts one or more documents in the respective collection.  In
 // case the session is in safe mode (see the SetSafe method) and an error
 // happens while inserting the provided documents, the returned error will
@@ -5140,60 +5134,39 @@ func (r *writeCmdResult) BulkErrorCases() []BulkErrorCase {
 	return ecases
 }
 
-// RetryableWriteOp will retry a normal write operation upon receiving a "recoverable" error
-func (c *Collection) RetryableWriteOp(op interface{}, ordered bool, ignoreDup bool) (lerr *LastError, err error) {
-	failedInsertCount := 0
-	failedDupCount := 0
+// RetryableWriteOp will retry write operations for a time period
+func (c *Collection) RetryableWriteOp(op interface{}, ordered bool) (lerr *LastError, err error) {
+	opStartTime := time.Now()
+	opDeadline := opStartTime.Add(5 * time.Second)
+
 retry:
 	lerr, err = c.writeOp(op, ordered)
-	// TODO: Find a better way to match error aside from string matching; @lerr is nil and thus we cannot get the Error code
-	// NOTE: Inserting with many workers on a Fixed unsharded collection gets recoverable "Partition key" errors
 	if err != nil {
-		if strings.Contains(err.Error(), "Request rate is large") ||
-			strings.Contains(err.Error(), "The request rate is too large") ||
-			strings.Contains(err.Error(), "timed out") ||
-			strings.Contains(err.Error(), "Partition key provided") ||
-			strings.Contains(err.Error(), "PartitionKey value must be supplied") ||
-			strings.Contains(err.Error(), "exceeded maximum alloted time") {
-			failedInsertCount++
-			coolDownTime := 250 * failedInsertCount
-			logger.Logvf(logger.Always, "We're overloading Cosmos DB; let's wait %d milliseconds", coolDownTime)
+		if qerr, ok := err.(*QueryError); ok {
+			switch qerr.Code {
 
-			cooldownTimer := time.NewTimer(time.Duration(coolDownTime) * time.Millisecond)
-			<-cooldownTimer.C
+			// TooManyRequest
+			case 16500:
+				//logger.Logvf(logger.Always, "We're overloading Cosmos DB; let's wait",)
+				time.Sleep(5 * time.Millisecond)
 
-			if failedInsertCount > 15 {
-				logger.Logvf(logger.Always, "Maximum throughput retry exceeded; moving on")
-			} else {
-				goto retry
+				if time.Now().After(opDeadline) {
+					logger.Logv(logger.Always, "Maximum throughput retry exceeded 5 seconds; moving on")
+				} else {
+					goto retry
+				}
+
+			// Malformed Request
+			case 9:
+				logger.Logv(logger.Always, "The request sent was malformed")
+
+			default:
+				logger.Logvf(logger.Always, "Unknown err case: %s", err)
 			}
-		} else if strings.Contains(err.Error(), "duplicate key") {
-			if ignoreDup {
-				return nil, nil
-			}
-
-			failedDupCount++
-			coolDownTime := 50 * failedDupCount
-
-			//logger.Logvf(logger.Always, "%t Duplicate key?; let's wait %d milliseconds", ignoreDup, coolDownTime)
-
-			cooldownTimer := time.NewTimer(time.Duration(coolDownTime) * time.Millisecond)
-			<-cooldownTimer.C
-
-			if failedDupCount > 5 {
-				//logger.Logvf(logger.Always, "Maximum duplicate retries exceeded (ignoreDup: %t)", ignoreDup)
-			} else {
-				goto retry
-			}
-
 		} else {
-			logger.Logvf(logger.Always, "Unknown err case: %s", err)
+			logger.Logvf(logger.Always, "Received something that is not a QueryError: %v", err)
 		}
-
 		return lerr, err
-	}
-	if failedDupCount != 0 {
-		logger.Logvf(logger.Always, "A recoverable dup key has been resolved in %d tries", failedDupCount)
 	}
 	return nil, nil
 }

@@ -2,9 +2,7 @@ package mgo
 
 import (
 	"bytes"
-	"fmt"
 	"sort"
-	"strings"
 	"sync"
 
 	"github.com/globalsign/mgo/bson"
@@ -331,13 +329,7 @@ func (b *Bulk) runInsert(action *bulkAction, result *BulkResult, berr *BulkError
 	if !b.ordered {
 		op.flags = 1 // ContinueOnError
 	}
-	lerr, err := b.c.RetryableWriteOp(op, b.ordered, false)
-	if err != nil {
-		if strings.Contains(err.Error(), "duplicate key") {
-			return b.Decompose()
-		}
-	}
-
+	lerr, err := b.c.RetryableWriteOp(op, b.ordered)
 	return b.checkSuccess(action, berr, lerr, err)
 }
 
@@ -384,7 +376,7 @@ func (b *Bulk) checkSuccess(action *bulkAction, berr *BulkError, lerr *LastError
 // one by one via InsertIgnoreDuplicate; this is a workaround in the scenario where a
 // bulk insert fails, but some documents in the bulk where successfully inserted,
 // causing a duplicate key on a retry with the bulk again.
-func (b *Bulk) Decompose() bool {
+/*func (b *Bulk) Decompose() bool {
 	b.mtx.Lock()
 	var recovered []interface{}
 	for _, action := range b.actions {
@@ -405,3 +397,4 @@ func (b *Bulk) Decompose() bool {
 	}
 	return true
 }
+*/
