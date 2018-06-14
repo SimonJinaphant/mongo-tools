@@ -10,6 +10,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/mongodb/mongo-tools/common/db"
@@ -35,6 +36,8 @@ func main() {
 	ingestOpts := &mongoimport.IngestOptions{}
 	opts.AddOptions(ingestOpts)
 	opts.URI.AddKnownURIParameters(options.KnownURIOptionsWriteConcern)
+
+	log.Logvf(log.Always, "Cores: %d", runtime.NumCPU())
 
 	args, err := opts.ParseArgs(os.Args[1:])
 	if err != nil {
