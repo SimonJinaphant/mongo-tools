@@ -8,6 +8,8 @@
 package mongoimport
 
 import (
+	"runtime"
+
 	"github.com/globalsign/mgo"
 	"github.com/globalsign/mgo/bson"
 	"github.com/mongodb/mongo-tools/common/db"
@@ -394,6 +396,7 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 		Throughput: imp.IngestOptions.Throughput,
 		ShardKey:   imp.IngestOptions.ShardKey,
 	})
+	collection.Database.Session.Close()
 
 	cooldownTimer := time.NewTimer(time.Duration(1) * time.Second)
 	<-cooldownTimer.C
@@ -427,10 +430,11 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 // into the target collection. It spreads the insert/upsert workload across one
 // or more workers.
 func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
-	numInsertionWorkers := imp.IngestOptions.NumInsertionWorkers
-	if numInsertionWorkers <= 0 {
-		numInsertionWorkers = 1
+	if imp.IngestOptions.NumInsertionWorkers < runtime.NumCPU() {
+		imp.IngestOptions.NumInsertionWorkers = runtime.NumCPU() * 2
 	}
+	numInsertionWorkers := imp.IngestOptions.NumInsertionWorkers
+	log.Logvf(log.Always, "Using %d insertion workers", numInsertionWorkers)
 
 	// Each ingest worker will return an error which will
 	// be set in the following cases:
@@ -633,24 +637,26 @@ func (imp *MongoImport) getInputReader(in io.Reader) (InputReader, error) {
 	return NewJSONInputReader(imp.InputOptions.JSONArray, in, imp.IngestOptions.NumDecodingWorkers), nil
 }
 
-func (imp *MongoImport) CleanUp() (int, error) {
+func (imp *MongoImport) OnFinish(dropOnComplete bool) error {
 	session, err := imp.SessionProvider.GetSession()
 	if err != nil {
-		return 0, err
+		return err
 	}
 	defer session.Close()
 
 	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
 	docCount, countErr := collection.Count()
 	if countErr != nil {
-		return 0, err
+		return err
 	}
-	log.Logvf(log.Always, "Counted: %d documents in CosmosDB", docCount)
+	log.Logvf(log.Always, "Collection: %s has a total of %d documents in Azure Cosmos DB", collection.Name, docCount)
 
-	dropErr := collection.Database.DropDatabase()
-	if dropErr != nil {
-		return 0, err
+	if dropOnComplete {
+		if dropErr := collection.Database.DropDatabase(); dropErr != nil {
+			return err
+		}
+		log.Logv(log.Always, "Database dropped success")
 	}
-	log.Logv(log.Always, "Database dropped success")
-	return 0, nil
+
+	return nil
 }
