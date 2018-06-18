@@ -10,7 +10,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"runtime"
 	"time"
 
 	"github.com/mongodb/mongo-tools/common/db"
@@ -36,8 +35,6 @@ func main() {
 	ingestOpts := &mongoimport.IngestOptions{}
 	opts.AddOptions(ingestOpts)
 	opts.URI.AddKnownURIParameters(options.KnownURIOptionsWriteConcern)
-
-	log.Logvf(log.Always, "Cores: %d", runtime.NumCPU())
 
 	args, err := opts.ParseArgs(os.Args[1:])
 	if err != nil {
@@ -106,10 +103,8 @@ func importCycle(opts *options.ToolOptions, inputOpts *mongoimport.InputOptions,
 		os.Exit(util.ExitError)
 	}
 
-	if ingestOpts.DropOnComplete {
-		_, cerr := m.CleanUp()
-		if cerr != nil {
-			log.Logvf(log.Always, "Failed to cleanup: %v", err)
-		}
+	if err := m.OnFinish(ingestOpts.DropOnComplete); err != nil {
+		log.Logvf(log.Always, "Failed to cleanup: %v", err)
 	}
+
 }
