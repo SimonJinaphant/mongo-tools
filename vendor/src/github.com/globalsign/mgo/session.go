@@ -3175,6 +3175,20 @@ func (c *Collection) CreateCustomCosmosDB(info *CosmosDBCollectionInfo) error {
 	return c.Database.Run(cmd, nil)
 }
 
+/*
+func (c *Collection) GetLastRequestStatistics() (charge uint, err error) {
+	var result bson.D
+
+	cmd := make(bson.D, 0, 4)
+	cmd = append(cmd, bson.DocElem{"getLastRequestStatistics", "1"})
+
+	err = c.Database.Run(cmd, &result)
+	m := result.Map()
+	charge = uint(math.Ceil(m["RequestCharge"].(float64)))
+
+	return charge, err
+}
+*/
 // Batch sets the batch size used when fetching documents from the database.
 // It's possible to change this setting on a per-session basis as well, using
 // the Batch method of Session.

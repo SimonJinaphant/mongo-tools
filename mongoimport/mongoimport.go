@@ -560,7 +560,6 @@ func (imp *MongoImport) runInsertionWorker(readDocs chan bson.D, manager *Hiring
 		return fmt.Errorf("error configuring session: %v", err)
 	}
 	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
-
 	inserter := imp.newCosmosDbInserter(collection)
 
 readLoop:
@@ -608,12 +607,11 @@ func (imp *MongoImport) newCosmosDbInserter(collection *mgo.Collection) *CosmosD
 	}
 }
 
-// Insert is part of the flushInserter interface and performs
-// upserts or inserts.
 func (ci *CosmosDbInserter) Insert(doc interface{}, manager *HiringManager, workerId int) error {
 	// Prevent the retry from re-creating the insertOp object again by explicitly storing it
 	insertOperation := mgo.CreateInsertOp(ci.collection.FullName, doc.(bson.D))
 	opDeadline := time.Now().Add(5 * time.Second)
+
 retry:
 	err := ci.collection.InsertWithOp(insertOperation)
 	if err != nil {
