@@ -151,15 +151,14 @@ type replyOp struct {
 }
 
 // Expose insertOp as public member by wrapping it
-type PInsertOp struct {
-	Iop *insertOp
+type InsertOperation struct {
+	Op *insertOp
 }
 
-func NewInsertOp(collectionName string, docs ...interface{}) *PInsertOp {
-	op := new(PInsertOp)
-	op.Iop = &insertOp{collectionName, docs, 0}
-
-	return op
+func CreateInsertOp(collectionName string, docs ...interface{}) *InsertOperation {
+	return &InsertOperation{
+		&insertOp{collectionName, docs, 0},
+	}
 }
 
 type insertOp struct {

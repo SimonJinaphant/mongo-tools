@@ -501,7 +501,7 @@ func (imp *MongoImport) runInsertionWorker(readDocs chan bson.D) (err error) {
 	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
 
 	var inserter flushInserter
-	inserter = imp.newRetryInserter(collection)
+	inserter = imp.newCosmosDbInserter(collection)
 
 readLoop:
 	for {
@@ -536,13 +536,13 @@ readLoop:
 	return filterIngestError(imp.IngestOptions.StopOnError, err)
 }
 
-type RetryInserter struct {
+type CosmosDbInserter struct {
 	imp        *MongoImport
 	collection *mgo.Collection
 }
 
-func (imp *MongoImport) newRetryInserter(collection *mgo.Collection) *RetryInserter {
-	return &RetryInserter{
+func (imp *MongoImport) newCosmosDbInserter(collection *mgo.Collection) *CosmosDbInserter {
+	return &CosmosDbInserter{
 		imp:        imp,
 		collection: collection,
 	}
@@ -550,16 +550,11 @@ func (imp *MongoImport) newRetryInserter(collection *mgo.Collection) *RetryInser
 
 // Insert is part of the flushInserter interface and performs
 // upserts or inserts.
-func (ri *RetryInserter) Insert(doc interface{}) error {
-	document := doc.(bson.D)
-	// We should prevent Insert() from creating a new insertOp object everytime it retries
-	// for performance reason. We managed to regain 2x the performance with this
-	//TODO: Refactor this piop crap
-	piop := mgo.NewInsertOp(ri.collection.FullName, document)
-	opStartTime := time.Now()
-	opDeadline := opStartTime.Add(5 * time.Second)
+func (ci *CosmosDbInserter) Insert(doc interface{}) error {
+	insertOperation := mgo.CreateInsertOp(ci.collection.FullName, doc.(bson.D))
+	opDeadline := time.Now().Add(5 * time.Second)
 retry:
-	err := ri.collection.InsertRaw(piop)
+	err := ci.collection.InsertWithOp(insertOperation)
 	if err != nil {
 		if qerr, ok := err.(*mgo.QueryError); ok {
 			switch qerr.Code {
@@ -591,7 +586,7 @@ retry:
 
 // Flush is needed so that upserter implements flushInserter, but upserter
 // doesn't buffer anything so we don't need to do anything in Flush.
-func (ri *RetryInserter) Flush() error {
+func (ci *CosmosDbInserter) Flush() error {
 	return nil
 }
 

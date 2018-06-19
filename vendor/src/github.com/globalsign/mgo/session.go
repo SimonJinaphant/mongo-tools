@@ -2855,8 +2855,8 @@ func (c *Collection) Insert(docs ...interface{}) error {
 }
 
 // Insert with the insert op directly (For performance)
-func (c *Collection) InsertRaw(op *PInsertOp) error {
-	_, err := c.writeOp(op.Iop, true)
+func (c *Collection) InsertWithOp(op *InsertOperation) error {
+	_, err := c.writeOp(op.Op, true)
 	return err
 }
 
