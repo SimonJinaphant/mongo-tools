@@ -501,14 +501,7 @@ func (imp *MongoImport) runInsertionWorker(readDocs chan bson.D) (err error) {
 	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
 
 	var inserter flushInserter
-	if imp.IngestOptions.Mode == modeInsert {
-		inserter = db.NewBufferedBulkInserter(collection, imp.IngestOptions.BulkBufferSize, !imp.IngestOptions.StopOnError)
-		if !imp.IngestOptions.MaintainInsertionOrder {
-			inserter.(*db.BufferedBulkInserter).Unordered()
-		}
-	} else {
-		inserter = imp.newUpserter(collection)
-	}
+	inserter = imp.newRetryInserter(collection)
 
 readLoop:
 	for {
@@ -541,6 +534,65 @@ readLoop:
 		}
 	}
 	return filterIngestError(imp.IngestOptions.StopOnError, err)
+}
+
+type RetryInserter struct {
+	imp        *MongoImport
+	collection *mgo.Collection
+}
+
+func (imp *MongoImport) newRetryInserter(collection *mgo.Collection) *RetryInserter {
+	return &RetryInserter{
+		imp:        imp,
+		collection: collection,
+	}
+}
+
+// Insert is part of the flushInserter interface and performs
+// upserts or inserts.
+func (ri *RetryInserter) Insert(doc interface{}) error {
+	document := doc.(bson.D)
+	// We should prevent Insert() from creating a new insertOp object everytime it retries
+	// for performance reason. We managed to regain 2x the performance with this
+	//TODO: Refactor this piop crap
+	piop := mgo.NewInsertOp(ri.collection.FullName, document)
+	opStartTime := time.Now()
+	opDeadline := opStartTime.Add(5 * time.Second)
+retry:
+	err := ri.collection.InsertRaw(piop)
+	if err != nil {
+		if qerr, ok := err.(*mgo.QueryError); ok {
+			switch qerr.Code {
+
+			// TooManyRequest
+			case 16500:
+				log.Logvf(log.Always, "We're overloading Cosmos DB; let's wait")
+				time.Sleep(5 * time.Millisecond)
+
+				if time.Now().After(opDeadline) {
+					log.Logv(log.Always, "Maximum throughput retry exceeded 5 seconds; moving on")
+				} else {
+					goto retry
+				}
+
+			// Malformed Request
+			case 9:
+				log.Logv(log.Always, "The request sent was malformed")
+
+			default:
+				log.Logvf(log.Always, "Unknown err code: %s", err)
+			}
+		} else {
+			log.Logvf(log.Always, "Received something that is not a QueryError: %v", err)
+		}
+	}
+	return err
+}
+
+// Flush is needed so that upserter implements flushInserter, but upserter
+// doesn't buffer anything so we don't need to do anything in Flush.
+func (ri *RetryInserter) Flush() error {
+	return nil
 }
 
 type upserter struct {

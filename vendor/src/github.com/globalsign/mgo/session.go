@@ -45,7 +45,6 @@ import (
 	"time"
 
 	"github.com/globalsign/mgo/bson"
-	logger "github.com/mongodb/mongo-tools/common/log"
 )
 
 // Mode read preference mode. See Eventual, Monotonic and Strong for details
@@ -2855,6 +2854,12 @@ func (c *Collection) Insert(docs ...interface{}) error {
 	return err
 }
 
+// Insert with the insert op directly (For performance)
+func (c *Collection) InsertRaw(op *PInsertOp) error {
+	_, err := c.writeOp(op.Iop, true)
+	return err
+}
+
 // Update finds a single document matching the provided selector document
 // and modifies it according to the update document.
 // If the session is in safe mode (see SetSafe) a ErrNotFound error is
@@ -5132,43 +5137,6 @@ func (r *writeCmdResult) BulkErrorCases() []BulkErrorCase {
 		ecases[i] = BulkErrorCase{err.Index, &QueryError{Code: err.Code, Message: err.ErrMsg}}
 	}
 	return ecases
-}
-
-// RetryableWriteOp will retry write operations for a time period
-func (c *Collection) RetryableWriteOp(op interface{}, ordered bool) (lerr *LastError, err error) {
-	opStartTime := time.Now()
-	opDeadline := opStartTime.Add(5 * time.Second)
-
-retry:
-	lerr, err = c.writeOp(op, ordered)
-	if err != nil {
-		if qerr, ok := err.(*QueryError); ok {
-			switch qerr.Code {
-
-			// TooManyRequest
-			case 16500:
-				//logger.Logvf(logger.Always, "We're overloading Cosmos DB; let's wait",)
-				time.Sleep(5 * time.Millisecond)
-
-				if time.Now().After(opDeadline) {
-					logger.Logv(logger.Always, "Maximum throughput retry exceeded 5 seconds; moving on")
-				} else {
-					goto retry
-				}
-
-			// Malformed Request
-			case 9:
-				logger.Logv(logger.Always, "The request sent was malformed")
-
-			default:
-				logger.Logvf(logger.Always, "Unknown err case: %s", err)
-			}
-		} else {
-			logger.Logvf(logger.Always, "Received something that is not a QueryError: %v", err)
-		}
-		return lerr, err
-	}
-	return nil, nil
 }
 
 // writeOp runs the given modifying operation, potentially followed up
