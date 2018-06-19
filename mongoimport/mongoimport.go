@@ -426,6 +426,76 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 	return insertionCount, e1
 }
 
+type AddWorkerAction func(h *HiringManager, a int)
+
+type HiringManager struct {
+	successCounter uint32
+	records        []uint16
+	recordsMtx     *sync.Mutex
+	wg             *sync.WaitGroup
+	Action         AddWorkerAction
+}
+
+func NewHiringManager(defaultWorkers int) *HiringManager {
+	return &HiringManager{
+		successCounter: 0,
+		records:        make([]uint16, 0, defaultWorkers),
+		recordsMtx:     new(sync.Mutex),
+		wg:             new(sync.WaitGroup),
+		Action:         nil,
+	}
+}
+
+func (h *HiringManager) CountWorkers() int {
+	return len(h.records)
+}
+
+func (h *HiringManager) IncrementWorkerSuccess(workerId int) {
+	h.recordsMtx.Lock()
+
+	h.records[workerId]++
+	if h.records[workerId] == 500 {
+		atomic.AddUint32(&h.successCounter, 1)
+		h.records[workerId] = 0
+
+		if h.successCounter == uint32(h.CountWorkers()) {
+			h.recordsMtx.Unlock()
+			h.HireNewWorker()
+			return
+		}
+	}
+	h.recordsMtx.Unlock()
+}
+
+func (h *HiringManager) ResetWorkerSuccess(workerId int) {
+	h.recordsMtx.Lock()
+	defer h.recordsMtx.Unlock()
+
+	h.records[workerId] = 0
+}
+
+func (h *HiringManager) HireNewWorker() {
+	h.recordsMtx.Lock()
+	defer h.recordsMtx.Unlock()
+
+	atomic.StoreUint32(&h.successCounter, 0)
+
+	h.records = append(h.records, 0)
+	newWorkerID := len(h.records) - 1
+
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		h.Action(h, newWorkerID)
+	}()
+
+	log.Logvf(log.Always, "Hired a new worker, there are now %d workers", len(h.records))
+}
+
+func (h *HiringManager) Await() {
+	h.wg.Wait()
+}
+
 // ingestDocuments accepts a channel from which it reads documents to be inserted
 // into the target collection. It spreads the insert/upsert workload across one
 // or more workers.
@@ -436,28 +506,19 @@ func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
 	numInsertionWorkers := imp.IngestOptions.NumInsertionWorkers
 	log.Logvf(log.Always, "Using %d insertion workers", numInsertionWorkers)
 
-	// Each ingest worker will return an error which will
-	// be set in the following cases:
-	//
-	// 1. There is a problem connecting with the server
-	// 2. The server becomes unreachable
-	// 3. There is an insertion/update error - e.g. duplicate key
-	//    error - and stopOnError is set to true
+	manager := NewHiringManager(numInsertionWorkers)
+	manager.Action = AddWorkerAction(func(hm *HiringManager, workerId int) {
+		err := imp.runInsertionWorker(readDocs, hm, workerId)
+		if err != nil {
+			imp.Kill(err)
+		}
+	})
 
-	wg := new(sync.WaitGroup)
 	for i := 0; i < numInsertionWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			// only set the first insertion error and cause sibling goroutines to terminate immediately
-			err := imp.runInsertionWorker(readDocs)
-			if err != nil && retErr == nil {
-				retErr = err
-				imp.Kill(err)
-			}
-		}()
+		manager.HireNewWorker()
 	}
-	wg.Wait()
+
+	manager.Await()
 	return
 }
 
@@ -489,7 +550,7 @@ type flushInserter interface {
 
 // runInsertionWorker is a helper to InsertDocuments - it reads document off
 // the read channel and prepares then in batches for insertion into the databas
-func (imp *MongoImport) runInsertionWorker(readDocs chan bson.D) (err error) {
+func (imp *MongoImport) runInsertionWorker(readDocs chan bson.D, manager *HiringManager, workerId int) (err error) {
 	session, err := imp.SessionProvider.GetSession()
 	if err != nil {
 		return fmt.Errorf("error connecting to mongod: %v", err)
@@ -500,8 +561,7 @@ func (imp *MongoImport) runInsertionWorker(readDocs chan bson.D) (err error) {
 	}
 	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
 
-	var inserter flushInserter
-	inserter = imp.newCosmosDbInserter(collection)
+	inserter := imp.newCosmosDbInserter(collection)
 
 readLoop:
 	for {
@@ -510,7 +570,7 @@ readLoop:
 			if !alive {
 				break readLoop
 			}
-			err = filterIngestError(imp.IngestOptions.StopOnError, inserter.Insert(document))
+			err = filterIngestError(imp.IngestOptions.StopOnError, inserter.Insert(document, manager, workerId))
 			if err != nil {
 				return err
 			}
@@ -520,7 +580,7 @@ readLoop:
 		}
 	}
 
-	err = inserter.Flush()
+	//err = inserter.Flush()
 	// TOOLS-349 correct import count for bulk operations
 	if bulkError, ok := err.(*mgo.BulkError); ok {
 		failedDocs := make(map[int]bool) // index of failures
@@ -550,18 +610,20 @@ func (imp *MongoImport) newCosmosDbInserter(collection *mgo.Collection) *CosmosD
 
 // Insert is part of the flushInserter interface and performs
 // upserts or inserts.
-func (ci *CosmosDbInserter) Insert(doc interface{}) error {
+func (ci *CosmosDbInserter) Insert(doc interface{}, manager *HiringManager, workerId int) error {
+	// Prevent the retry from re-creating the insertOp object again by explicitly storing it
 	insertOperation := mgo.CreateInsertOp(ci.collection.FullName, doc.(bson.D))
 	opDeadline := time.Now().Add(5 * time.Second)
 retry:
 	err := ci.collection.InsertWithOp(insertOperation)
 	if err != nil {
+		manager.ResetWorkerSuccess(workerId)
 		if qerr, ok := err.(*mgo.QueryError); ok {
 			switch qerr.Code {
 
 			// TooManyRequest
 			case 16500:
-				log.Logvf(log.Always, "We're overloading Cosmos DB; let's wait")
+				//log.Logvf(log.Always, "We're overloading Cosmos DB; let's wait")
 				time.Sleep(5 * time.Millisecond)
 
 				if time.Now().After(opDeadline) {
@@ -575,11 +637,13 @@ retry:
 				log.Logv(log.Always, "The request sent was malformed")
 
 			default:
-				log.Logvf(log.Always, "Unknown err code: %s", err)
+				log.Logvf(log.Always, "Unknown QueryError code: %s", err)
 			}
 		} else {
 			log.Logvf(log.Always, "Received something that is not a QueryError: %v", err)
 		}
+	} else {
+		manager.IncrementWorkerSuccess(workerId)
 	}
 	return err
 }
