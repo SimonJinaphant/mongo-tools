@@ -3181,7 +3181,7 @@ func (c *Collection) CreateCustomCosmosDB(info *CosmosDBCollectionInfo) error {
 	return c.Database.Run(cmd, nil)
 }
 
-func (c *Collection) GetLastRequestStatistics() (charge uint, err error) {
+func (c *Collection) GetLastRequestStatistics() (charge int64, err error) {
 	var result bson.D
 
 	cmd := make(bson.D, 0, 4)
@@ -3189,7 +3189,7 @@ func (c *Collection) GetLastRequestStatistics() (charge uint, err error) {
 
 	err = c.Database.Run(cmd, &result)
 	m := result.Map()
-	charge = uint(math.Ceil(m["RequestCharge"].(float64)))
+	charge = int64(math.Ceil(m["RequestCharge"].(float64)))
 
 	return charge, err
 }

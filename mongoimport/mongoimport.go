@@ -8,6 +8,7 @@
 package mongoimport
 
 import (
+	"math"
 	"runtime"
 
 	"github.com/globalsign/mgo"
@@ -429,59 +430,108 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 type AddWorkerAction func(h *HiringManager, a int)
 
 type HiringManager struct {
-	successCounter uint32
-	records        []uint16
-	recordsMtx     *sync.Mutex
-	wg             *sync.WaitGroup
-	Action         AddWorkerAction
+	latencyRecords       []int64
+	chargeRecords        []int64
+	workerCount          int
+	collectionThroughput int
+	wg                   *sync.WaitGroup
+	recordWg             *sync.WaitGroup
+	Action               AddWorkerAction
 }
 
-func NewHiringManager(defaultWorkers int) *HiringManager {
+func NewHiringManager(defaultWorkers int, ru int) *HiringManager {
 	return &HiringManager{
-		successCounter: 0,
-		records:        make([]uint16, 0, defaultWorkers),
-		recordsMtx:     new(sync.Mutex),
-		wg:             new(sync.WaitGroup),
-		Action:         nil,
+		latencyRecords:       make([]int64, 0, defaultWorkers),
+		chargeRecords:        make([]int64, 0, defaultWorkers),
+		workerCount:          0,
+		collectionThroughput: ru,
+		wg:                   new(sync.WaitGroup),
+		recordWg:             new(sync.WaitGroup),
+		Action:               nil,
 	}
 }
 
 func (h *HiringManager) CountWorkers() int {
-	return len(h.records)
+	return h.workerCount
 }
 
-func (h *HiringManager) IncrementWorkerSuccess(workerId int) {
-	h.recordsMtx.Lock()
+func (h *HiringManager) Await() {
+	h.wg.Wait()
+}
 
-	h.records[workerId]++
-	if h.records[workerId] == 500 {
-		atomic.AddUint32(&h.successCounter, 1)
-		h.records[workerId] = 0
+func (h *HiringManager) CanNotify(workerId int) bool {
+	return atomic.LoadInt64(&h.latencyRecords[workerId]) == -1
+}
 
-		if h.successCounter == uint32(h.CountWorkers()) {
-			h.recordsMtx.Unlock()
-			h.HireNewWorker()
-			return
-		}
+func (h *HiringManager) Notify(workerId int, latency int64, charge int64) {
+	if latency < 0 {
+		log.Logvf(log.Always, "Bad sample latency")
+		return
 	}
-	h.recordsMtx.Unlock()
+	defer h.recordWg.Done()
+	atomic.StoreInt64(&h.latencyRecords[workerId], latency)
+	atomic.StoreInt64(&h.chargeRecords[workerId], charge)
+	log.Logvf(log.Always, "Worker %d reported %d ms and %d RU", workerId, latency, charge)
 }
 
-func (h *HiringManager) ResetWorkerSuccess(workerId int) {
-	h.recordsMtx.Lock()
-	defer h.recordsMtx.Unlock()
+func (h *HiringManager) Start(n int) {
+	for i := 0; i < n; i++ {
+		h.HireNewWorker()
+	}
 
-	h.records[workerId] = 0
+	go func() {
+		sleepTime := 5 * time.Second
+		for {
+			time.Sleep(sleepTime)
+			//TODO: Exit condition if workers crash
+			log.Logv(log.Always, "Manager is requesting updates from workers")
+
+			h.recordWg.Add(h.workerCount)
+			for i := 0; i < h.workerCount; i++ {
+				atomic.StoreInt64(&h.latencyRecords[i], -1)
+				atomic.StoreInt64(&h.chargeRecords[i], -1)
+			}
+
+			// Await for all workers to fill in their report
+			h.recordWg.Wait()
+			log.Logv(log.Always, "Manager has updates from all workers")
+
+			var latencySum int64
+			var chargeSum int64
+			for i := 0; i < h.workerCount; i++ {
+				latencySum += atomic.LoadInt64(&h.latencyRecords[i])
+				chargeSum += atomic.LoadInt64(&h.chargeRecords[i])
+
+			}
+			averageLatency := latencySum / int64(h.workerCount)
+			averageCharge := chargeSum / int64(h.workerCount)
+
+			targetAmount := (float64(h.collectionThroughput) * float64(averageLatency)) / float64(averageCharge)
+			amount := int(math.Ceil(targetAmount))
+
+			amountToHire := (amount - h.workerCount) / 2
+			if amountToHire < 0 {
+				log.Logv(log.Always, "No need to hire anymore")
+				break
+			}
+			if amountToHire > 100 {
+				log.Logv(log.Always, "Tried to hire too many")
+				break
+			}
+			for i := 0; i < amountToHire; i++ {
+				h.HireNewWorker()
+			}
+			sleepTime = sleepTime * 2
+		}
+		log.Logv(log.Always, "Hiring manager has exit")
+	}()
 }
 
 func (h *HiringManager) HireNewWorker() {
-	h.recordsMtx.Lock()
-	defer h.recordsMtx.Unlock()
-
-	atomic.StoreUint32(&h.successCounter, 0)
-
-	h.records = append(h.records, 0)
-	newWorkerID := len(h.records) - 1
+	h.latencyRecords = append(h.latencyRecords, 0)
+	h.chargeRecords = append(h.chargeRecords, 0)
+	newWorkerID := h.workerCount
+	h.workerCount++
 
 	h.wg.Add(1)
 	go func() {
@@ -489,11 +539,7 @@ func (h *HiringManager) HireNewWorker() {
 		h.Action(h, newWorkerID)
 	}()
 
-	log.Logvf(log.Always, "Hired a new worker, there are now %d workers", len(h.records))
-}
-
-func (h *HiringManager) Await() {
-	h.wg.Wait()
+	log.Logvf(log.Always, "Hired a new worker, there are now %d workers", h.workerCount)
 }
 
 // ingestDocuments accepts a channel from which it reads documents to be inserted
@@ -504,20 +550,16 @@ func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
 		imp.IngestOptions.NumInsertionWorkers = runtime.NumCPU() * 2
 	}
 	numInsertionWorkers := imp.IngestOptions.NumInsertionWorkers
-	log.Logvf(log.Always, "Using %d insertion workers", numInsertionWorkers)
+	log.Logvf(log.Always, "Assigning %d insertion workers", numInsertionWorkers)
 
-	manager := NewHiringManager(numInsertionWorkers)
+	manager := NewHiringManager(numInsertionWorkers, imp.IngestOptions.Throughput)
 	manager.Action = AddWorkerAction(func(hm *HiringManager, workerId int) {
 		err := imp.runInsertionWorker(readDocs, hm, workerId)
 		if err != nil {
 			imp.Kill(err)
 		}
 	})
-
-	for i := 0; i < numInsertionWorkers; i++ {
-		manager.HireNewWorker()
-	}
-
+	manager.Start(numInsertionWorkers)
 	manager.Await()
 	return
 }
@@ -574,6 +616,7 @@ readLoop:
 				return err
 			}
 			atomic.AddUint64(&imp.insertionCount, 1)
+
 		case <-imp.Dying():
 			return nil
 		}
@@ -615,7 +658,6 @@ func (ci *CosmosDbInserter) Insert(doc interface{}, manager *HiringManager, work
 retry:
 	latency, err := ci.collection.InsertWithOp(insertOperation)
 	if err != nil {
-		manager.ResetWorkerSuccess(workerId)
 		if qerr, ok := err.(*mgo.QueryError); ok {
 			switch qerr.Code {
 
@@ -641,8 +683,10 @@ retry:
 			log.Logvf(log.Always, "Received something that is not a QueryError: %v", err)
 		}
 	} else {
-		log.Logvf(log.Always, "Latency: %d", latency)
-		manager.IncrementWorkerSuccess(workerId)
+		insertCharge, _ := ci.collection.GetLastRequestStatistics()
+		if manager.CanNotify(workerId) {
+			manager.Notify(workerId, latency, insertCharge)
+		}
 	}
 	return err
 }
