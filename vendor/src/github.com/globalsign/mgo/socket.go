@@ -150,6 +150,17 @@ type replyOp struct {
 	replyDocs int32
 }
 
+// Expose insertOp as public member by wrapping it
+type InsertOperation struct {
+	Op *insertOp
+}
+
+func CreateInsertOp(collectionName string, docs ...interface{}) *InsertOperation {
+	return &InsertOperation{
+		&insertOp{collectionName, docs, 0},
+	}
+}
+
 type insertOp struct {
 	collection string        // "database.collection"
 	documents  []interface{} // One or more documents to insert
