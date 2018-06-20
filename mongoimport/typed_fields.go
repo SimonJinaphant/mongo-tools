@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/mongodb/mongo-tools/mongoimport/dateconv"
-	"gopkg.in/mgo.v2/bson"
+	"github.com/globalsign/mgo/bson"
 )
 
 // columnType defines different types for columns that can be parsed distinctly

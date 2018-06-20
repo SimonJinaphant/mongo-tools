@@ -283,7 +283,7 @@ func readCString(b []byte) string {
 }
 
 // retrieves a 32 bit into from the given byte array whose first byte is in position pos
-// Taken from gopkg.in/mgo.v2/socket.go
+// Taken from github.com/globalsign/mgo/socket.go
 func getInt32(b []byte, pos int) int32 {
 	return (int32(b[pos+0])) |
 		(int32(b[pos+1]) << 8) |
@@ -292,7 +292,7 @@ func getInt32(b []byte, pos int) int32 {
 }
 
 // SetInt32 sets the 32-bit int into the given byte array at position post
-// Taken from gopkg.in/mgo.v2/socket.go
+// Taken from github.com/globalsign/mgo/socket.go
 func SetInt32(b []byte, pos int, i int32) {
 	b[pos] = byte(i)
 	b[pos+1] = byte(i >> 8)
@@ -301,7 +301,7 @@ func SetInt32(b []byte, pos int, i int32) {
 }
 
 // retrieves a 64 bit into from the given byte array whose first byte is in position pos
-// Taken from gopkg.in/mgo.v2/socket.go
+// Taken from github.com/globalsign/mgo/socket.go
 func getInt64(b []byte, pos int) int64 {
 	return (int64(b[pos+0])) |
 		(int64(b[pos+1]) << 8) |
@@ -325,7 +325,7 @@ func convertKeys(v bson.M) (bson.M, error) {
 }
 
 // SetInt64 sets the 64-bit int into the given byte array at position post
-// Taken from gopkg.in/mgo.v2/socket.go
+// Taken from github.com/globalsign/mgo/socket.go
 func SetInt64(b []byte, pos int, i int64) {
 	b[pos] = byte(i)
 	b[pos+1] = byte(i >> 8)

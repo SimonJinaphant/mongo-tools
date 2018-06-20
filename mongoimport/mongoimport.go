@@ -8,13 +8,15 @@
 package mongoimport
 
 import (
+	"runtime"
+
+	"github.com/globalsign/mgo"
+	"github.com/globalsign/mgo/bson"
 	"github.com/mongodb/mongo-tools/common/db"
 	"github.com/mongodb/mongo-tools/common/log"
 	"github.com/mongodb/mongo-tools/common/options"
 	"github.com/mongodb/mongo-tools/common/progress"
 	"github.com/mongodb/mongo-tools/common/util"
-	"gopkg.in/mgo.v2"
-	"gopkg.in/mgo.v2/bson"
 	"gopkg.in/tomb.v2"
 
 	"fmt"
@@ -24,6 +26,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Input format types accepted by mongoimport.
@@ -227,6 +230,11 @@ func (imp *MongoImport) ValidateSettings(args []string) error {
 		imp.IngestOptions.BulkBufferSize = 1000
 	}
 
+	// For testing purposes, make sure to drop the database if we're cycling
+	if imp.IngestOptions.ImportCycle > 1 {
+		imp.IngestOptions.DropOnComplete = true
+	}
+
 	// ensure no more than one positional argument is supplied
 	if len(args) > 1 {
 		return fmt.Errorf("only one positional argument is allowed")
@@ -383,6 +391,22 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 		}
 	}
 
+	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
+	errCosmosCol := collection.CreateCustomCosmosDB(&mgo.CosmosDBCollectionInfo{
+		Throughput: imp.IngestOptions.Throughput,
+		ShardKey:   imp.IngestOptions.ShardKey,
+	})
+	collection.Database.Session.Close()
+
+	cooldownTimer := time.NewTimer(time.Duration(1) * time.Second)
+	<-cooldownTimer.C
+	log.Logv(log.Always, "Custom collection created")
+
+	//TODO: Define scenario where we want to change the throughput of an existing collection...
+	if errCosmosCol != nil {
+		log.Logvf(log.Always, "Unable to create collection: %s", collection.Name)
+		return 0, errCosmosCol
+	}
 	readDocs := make(chan bson.D, workerBufferSize)
 	processingErrChan := make(chan error)
 	ordered := imp.IngestOptions.MaintainInsertionOrder
@@ -406,10 +430,11 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 // into the target collection. It spreads the insert/upsert workload across one
 // or more workers.
 func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
-	numInsertionWorkers := imp.IngestOptions.NumInsertionWorkers
-	if numInsertionWorkers <= 0 {
-		numInsertionWorkers = 1
+	if imp.IngestOptions.NumInsertionWorkers < runtime.NumCPU() {
+		imp.IngestOptions.NumInsertionWorkers = runtime.NumCPU() * 2
 	}
+	numInsertionWorkers := imp.IngestOptions.NumInsertionWorkers
+	log.Logvf(log.Always, "Using %d insertion workers", numInsertionWorkers)
 
 	// Each ingest worker will return an error which will
 	// be set in the following cases:
@@ -610,4 +635,28 @@ func (imp *MongoImport) getInputReader(in io.Reader) (InputReader, error) {
 		return NewTSVInputReader(colSpecs, in, out, imp.IngestOptions.NumDecodingWorkers, ignoreBlanks), nil
 	}
 	return NewJSONInputReader(imp.InputOptions.JSONArray, in, imp.IngestOptions.NumDecodingWorkers), nil
+}
+
+func (imp *MongoImport) OnFinish(dropOnComplete bool) error {
+	session, err := imp.SessionProvider.GetSession()
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+
+	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
+	docCount, countErr := collection.Count()
+	if countErr != nil {
+		return err
+	}
+	log.Logvf(log.Always, "Collection: %s has a total of %d documents in Azure Cosmos DB", collection.Name, docCount)
+
+	if dropOnComplete {
+		if dropErr := collection.Database.DropDatabase(); dropErr != nil {
+			return err
+		}
+		log.Logv(log.Always, "Database dropped success")
+	}
+
+	return nil
 }

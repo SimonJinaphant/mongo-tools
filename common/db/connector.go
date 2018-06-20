@@ -13,7 +13,7 @@ import (
 	"github.com/mongodb/mongo-tools/common/db/kerberos"
 	"github.com/mongodb/mongo-tools/common/options"
 	"github.com/mongodb/mongo-tools/common/util"
-	"gopkg.in/mgo.v2"
+	"github.com/globalsign/mgo"
 )
 
 // Interface type for connecting to the database.

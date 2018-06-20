@@ -14,8 +14,8 @@ import (
 	"fmt"
 	"github.com/mongodb/mongo-tools/common/json"
 	"github.com/mongodb/mongo-tools/common/util"
-	"gopkg.in/mgo.v2"
-	"gopkg.in/mgo.v2/bson"
+	"github.com/globalsign/mgo"
+	"github.com/globalsign/mgo/bson"
 	"strconv"
 	"time"
 )

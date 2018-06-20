@@ -18,8 +18,8 @@ import (
 	"github.com/mongodb/mongo-tools/common/signals"
 	"github.com/mongodb/mongo-tools/common/util"
 	"github.com/mongodb/mongo-tools/mongoexport"
-	"gopkg.in/mgo.v2"
-	"gopkg.in/mgo.v2/bson"
+	"github.com/globalsign/mgo"
+	"github.com/globalsign/mgo/bson"
 )
 
 const (
