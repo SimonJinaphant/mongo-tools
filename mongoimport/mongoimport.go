@@ -8,7 +8,6 @@
 package mongoimport
 
 import (
-	"math"
 	"runtime"
 
 	"github.com/globalsign/mgo"
@@ -434,6 +433,7 @@ type HiringManager struct {
 	chargeRecords        []int64
 	workerCount          int
 	collectionThroughput int
+	rateLimitCount       int64
 	wg                   *sync.WaitGroup
 	recordWg             *sync.WaitGroup
 	Action               AddWorkerAction
@@ -444,6 +444,7 @@ func NewHiringManager(defaultWorkers int, ru int) *HiringManager {
 		latencyRecords:       make([]int64, 0, defaultWorkers),
 		chargeRecords:        make([]int64, 0, defaultWorkers),
 		workerCount:          0,
+		rateLimitCount:       0,
 		collectionThroughput: ru,
 		wg:                   new(sync.WaitGroup),
 		recordWg:             new(sync.WaitGroup),
@@ -471,7 +472,7 @@ func (h *HiringManager) Notify(workerId int, latency int64, charge int64) {
 	defer h.recordWg.Done()
 	atomic.StoreInt64(&h.latencyRecords[workerId], latency)
 	atomic.StoreInt64(&h.chargeRecords[workerId], charge)
-	log.Logvf(log.Always, "Worker %d reported %d ms and %d RU", workerId, latency, charge)
+	//log.Logvf(log.Always, "Worker %d reported %d ms and %d RU", workerId, latency, charge)
 }
 
 func (h *HiringManager) Start(n int) {
@@ -480,50 +481,74 @@ func (h *HiringManager) Start(n int) {
 	}
 
 	go func() {
-		sleepTime := 5 * time.Second
+		/*
+			sleepTime := 5 * time.Second
+
+				for {
+					time.Sleep(sleepTime)
+					//TODO: Exit condition if workers crash
+					log.Logv(log.Always, "Manager is requesting updates from workers")
+
+					h.recordWg.Add(h.workerCount)
+					for i := 0; i < h.workerCount; i++ {
+						atomic.StoreInt64(&h.latencyRecords[i], -1)
+						atomic.StoreInt64(&h.chargeRecords[i], -1)
+					}
+
+					// Await for all workers to fill in their report
+					h.recordWg.Wait()
+					log.Logv(log.Always, "Manager has updates from all workers")
+
+					var latencySum int64
+					var chargeSum int64
+					for i := 0; i < h.workerCount; i++ {
+						latencySum += atomic.LoadInt64(&h.latencyRecords[i])
+						chargeSum += atomic.LoadInt64(&h.chargeRecords[i])
+
+					}
+					averageLatency := latencySum / int64(h.workerCount)
+					averageCharge := chargeSum / int64(h.workerCount)
+					log.Logvf(log.Always, "Avg latency %d | avg charge: %d", averageLatency, averageCharge)
+
+					targetAmount := (float64(h.collectionThroughput) * float64(averageLatency) / 1000000.0) / float64(averageCharge)
+					amount := int(math.Ceil(targetAmount))
+					amountToHire := (amount - h.workerCount) / 2
+
+					log.Logvf(log.Always, "Target workers %d | Hiring %d", amount, amountToHire)
+					if amountToHire <= 0 {
+						log.Logv(log.Always, "No need to hire anymore")
+						break
+					}
+					if amountToHire > 100 {
+						log.Logv(log.Always, "Tried to hire too many")
+						break
+					}
+					limitCount := atomic.LoadInt64(&h.rateLimitCount)
+					atomic.StoreInt64(&h.rateLimitCount, 0)
+					if limitCount > 0 {
+						log.Logvf(log.Always, "There was %d `Request rate too large` responses, no extra workers are needed", limitCount)
+						continue
+					}
+					for i := 0; i < amountToHire; i++ {
+						h.HireNewWorker()
+					}
+					log.Logvf(log.Always, "Manager thinks we can move faster; there are now %d workers", h.workerCount)
+					sleepTime = sleepTime + (3 * time.Second)
+				}
+				log.Logv(log.Always, "Hiring manager has stopped mass hiring; switching to single hire")
+		*/
 		for {
-			time.Sleep(sleepTime)
-			//TODO: Exit condition if workers crash
-			log.Logv(log.Always, "Manager is requesting updates from workers")
-
-			h.recordWg.Add(h.workerCount)
-			for i := 0; i < h.workerCount; i++ {
-				atomic.StoreInt64(&h.latencyRecords[i], -1)
-				atomic.StoreInt64(&h.chargeRecords[i], -1)
-			}
-
-			// Await for all workers to fill in their report
-			h.recordWg.Wait()
-			log.Logv(log.Always, "Manager has updates from all workers")
-
-			var latencySum int64
-			var chargeSum int64
-			for i := 0; i < h.workerCount; i++ {
-				latencySum += atomic.LoadInt64(&h.latencyRecords[i])
-				chargeSum += atomic.LoadInt64(&h.chargeRecords[i])
-
-			}
-			averageLatency := latencySum / int64(h.workerCount)
-			averageCharge := chargeSum / int64(h.workerCount)
-
-			targetAmount := (float64(h.collectionThroughput) * float64(averageLatency)) / float64(averageCharge)
-			amount := int(math.Ceil(targetAmount))
-
-			amountToHire := (amount - h.workerCount) / 2
-			if amountToHire < 0 {
-				log.Logv(log.Always, "No need to hire anymore")
-				break
-			}
-			if amountToHire > 100 {
-				log.Logv(log.Always, "Tried to hire too many")
-				break
-			}
-			for i := 0; i < amountToHire; i++ {
+			time.Sleep(5 * time.Second)
+			limitCount := atomic.LoadInt64(&h.rateLimitCount)
+			atomic.StoreInt64(&h.rateLimitCount, 0)
+			if limitCount > 0 {
+				log.Logvf(log.Always, "There was %d `Request rate too large` responses, no extra workers are needed", limitCount)
+				continue
+			} else {
 				h.HireNewWorker()
+				log.Logvf(log.Always, "Manager thinks we can move a bit faster; there are now %d workers", h.workerCount)
 			}
-			sleepTime = sleepTime * 2
 		}
-		log.Logv(log.Always, "Hiring manager has exit")
 	}()
 }
 
@@ -538,8 +563,10 @@ func (h *HiringManager) HireNewWorker() {
 		defer h.wg.Done()
 		h.Action(h, newWorkerID)
 	}()
+}
 
-	log.Logvf(log.Always, "Hired a new worker, there are now %d workers", h.workerCount)
+func (h *HiringManager) NotifyRateLimit() {
+	atomic.AddInt64(&h.rateLimitCount, 1)
 }
 
 // ingestDocuments accepts a channel from which it reads documents to be inserted
@@ -663,7 +690,8 @@ retry:
 
 			// TooManyRequest
 			case 16500:
-				log.Logvf(log.Always, "We're overloading Cosmos DB; let's wait")
+				manager.NotifyRateLimit()
+				//log.Logvf(log.Always, "We're overloading Cosmos DB; let's wait")
 				time.Sleep(5 * time.Millisecond)
 
 				if time.Now().After(opDeadline) {
@@ -683,8 +711,8 @@ retry:
 			log.Logvf(log.Always, "Received something that is not a QueryError: %v", err)
 		}
 	} else {
-		insertCharge, _ := ci.collection.GetLastRequestStatistics()
 		if manager.CanNotify(workerId) {
+			insertCharge, _ := ci.collection.GetLastRequestStatistics()
 			manager.Notify(workerId, latency, insertCharge)
 		}
 	}
