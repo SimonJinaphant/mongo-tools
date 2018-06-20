@@ -613,7 +613,7 @@ func (ci *CosmosDbInserter) Insert(doc interface{}, manager *HiringManager, work
 	opDeadline := time.Now().Add(5 * time.Second)
 
 retry:
-	err := ci.collection.InsertWithOp(insertOperation)
+	latency, err := ci.collection.InsertWithOp(insertOperation)
 	if err != nil {
 		manager.ResetWorkerSuccess(workerId)
 		if qerr, ok := err.(*mgo.QueryError); ok {
@@ -621,7 +621,7 @@ retry:
 
 			// TooManyRequest
 			case 16500:
-				//log.Logvf(log.Always, "We're overloading Cosmos DB; let's wait")
+				log.Logvf(log.Always, "We're overloading Cosmos DB; let's wait")
 				time.Sleep(5 * time.Millisecond)
 
 				if time.Now().After(opDeadline) {
@@ -641,6 +641,7 @@ retry:
 			log.Logvf(log.Always, "Received something that is not a QueryError: %v", err)
 		}
 	} else {
+		log.Logvf(log.Always, "Latency: %d", latency)
 		manager.IncrementWorkerSuccess(workerId)
 	}
 	return err

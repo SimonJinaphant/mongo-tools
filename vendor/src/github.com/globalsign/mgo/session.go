@@ -2855,9 +2855,15 @@ func (c *Collection) Insert(docs ...interface{}) error {
 }
 
 // Insert with the insert op directly (For performance)
-func (c *Collection) InsertWithOp(op *InsertOperation) error {
-	_, err := c.writeOp(op.Op, true)
-	return err
+func (c *Collection) InsertWithOp(op *InsertOperation) (latency int64, err error) {
+	startTime := time.Now()
+	_, err = c.writeOp(op.Op, true)
+	endTime := time.Now()
+	latency = endTime.Sub(startTime).Nanoseconds() / 1000
+	if err != nil {
+		return -1, err
+	}
+	return latency, err
 }
 
 // Update finds a single document matching the provided selector document
@@ -3175,7 +3181,6 @@ func (c *Collection) CreateCustomCosmosDB(info *CosmosDBCollectionInfo) error {
 	return c.Database.Run(cmd, nil)
 }
 
-/*
 func (c *Collection) GetLastRequestStatistics() (charge uint, err error) {
 	var result bson.D
 
@@ -3188,7 +3193,7 @@ func (c *Collection) GetLastRequestStatistics() (charge uint, err error) {
 
 	return charge, err
 }
-*/
+
 // Batch sets the batch size used when fetching documents from the database.
 // It's possible to change this setting on a per-session basis as well, using
 // the Batch method of Session.
