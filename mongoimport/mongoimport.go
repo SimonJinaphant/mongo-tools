@@ -233,7 +233,7 @@ func (imp *MongoImport) ValidateSettings(args []string) error {
 
 	// For testing purposes, make sure to drop the database if we're cycling
 	if imp.IngestOptions.ImportCycle > 1 {
-		imp.IngestOptions.DropOnComplete = true
+		imp.IngestOptions.Drop = true
 	}
 
 	// ensure no more than one positional argument is supplied
@@ -401,10 +401,10 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 
 	cooldownTimer := time.NewTimer(time.Duration(1) * time.Second)
 	<-cooldownTimer.C
-	log.Logv(log.Always, "Custom collection created")
 
 	//TODO: Define scenario where we want to change the throughput of an existing collection...
 	if errCosmosCol != nil {
+		// TODO: Tell the use --drop
 		log.Logvf(log.Always, "Unable to create collection: %s", collection.Name)
 		return 0, errCosmosCol
 	}
@@ -480,7 +480,10 @@ func (h *HiringManager) Start(n int, imp *MongoImport) {
 	for i := 0; i < n; i++ {
 		h.HireNewWorker()
 	}
-
+	if !imp.IngestOptions.AutoScaleWorkers {
+		log.Logv(log.Info, "Auto Scaling of Insertion Workers is not enable in this run")
+		return
+	}
 	go func() {
 		sleepTime := 5 * time.Second
 
@@ -505,11 +508,11 @@ func (h *HiringManager) Start(n int, imp *MongoImport) {
 			}
 			averageLatency := latencySum / int64(h.workerCount)
 			averageCharge := chargeSum / int64(h.workerCount)
-			log.Logvf(log.Always, "On average, insertions took %d (ns) and consumed %d RU", averageLatency, averageCharge)
+			log.Logvf(log.Info, "On average, insertions took %d (ns) and consumed %d RU", averageLatency, averageCharge)
 
 			amount := int(math.Ceil((float64(h.throughput) * float64(averageLatency) / 1000000.0) / float64(averageCharge)))
 			amountToHire := (amount - h.workerCount) / 2
-			log.Logvf(log.Always, "Target workers %d | Hiring %d", amount, amountToHire)
+			log.Logvf(log.Info, "Target workers %d | Hiring %d", amount, amountToHire)
 			if amountToHire <= 0 || amountToHire > 100 || h.WasRecentlyRateLimited() {
 				break
 			}
@@ -517,11 +520,11 @@ func (h *HiringManager) Start(n int, imp *MongoImport) {
 			for i := 0; i < amountToHire; i++ {
 				h.HireNewWorker()
 			}
-			log.Logvf(log.Always, "Manager thinks we can move faster; there are now %d workers", h.workerCount)
+			log.Logvf(log.Info, "Manager thinks we can move faster; there are now %d workers", h.workerCount)
 			sleepTime = sleepTime + (3 * time.Second)
 		}
 
-		log.Logv(log.Always, "Hiring manager has stopped mass hiring; switching to single hire")
+		log.Logv(log.Info, "Hiring manager has stopped mass hiring; switching to single hire")
 
 		for {
 			time.Sleep(5 * time.Second)
@@ -533,7 +536,7 @@ func (h *HiringManager) Start(n int, imp *MongoImport) {
 			}
 
 			h.HireNewWorker()
-			log.Logvf(log.Always, "Manager thinks we can move a bit faster; there are now %d workers", h.workerCount)
+			log.Logvf(log.Info, "Manager thinks we can move a bit faster; there are now %d workers", h.workerCount)
 		}
 	}()
 }
@@ -559,7 +562,7 @@ func (h *HiringManager) WasRecentlyRateLimited() bool {
 	limitCount := atomic.LoadInt64(&h.rateLimitCounter)
 	atomic.StoreInt64(&h.rateLimitCounter, 0)
 	if limitCount > 0 {
-		log.Logvf(log.Always, "There was %d `Request rate too large` responses, no extra workers are needed", limitCount)
+		log.Logvf(log.Info, "There was %d `Request rate too large` responses, no extra workers are needed", limitCount)
 		return true
 	}
 	return false
@@ -573,7 +576,7 @@ func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
 		imp.IngestOptions.NumInsertionWorkers = runtime.NumCPU() * 2
 	}
 	numInsertionWorkers := imp.IngestOptions.NumInsertionWorkers
-	log.Logvf(log.Always, "Assigning %d insertion workers", numInsertionWorkers)
+	log.Logvf(log.Info, "Assigning %d insertion workers", numInsertionWorkers)
 
 	manager := NewHiringManager(numInsertionWorkers, imp.IngestOptions.Throughput)
 	manager.Action = AddWorkerAction(func(hm *HiringManager, workerId int) {
@@ -815,7 +818,7 @@ func (imp *MongoImport) getInputReader(in io.Reader) (InputReader, error) {
 	return NewJSONInputReader(imp.InputOptions.JSONArray, in, imp.IngestOptions.NumDecodingWorkers), nil
 }
 
-func (imp *MongoImport) OnFinish(dropOnComplete bool) error {
+func (imp *MongoImport) CountDocumentsInCosmosDb() error {
 	session, err := imp.SessionProvider.GetSession()
 	if err != nil {
 		return err
@@ -828,13 +831,6 @@ func (imp *MongoImport) OnFinish(dropOnComplete bool) error {
 		return err
 	}
 	log.Logvf(log.Always, "Collection: %s has a total of %d documents in Azure Cosmos DB", collection.Name, docCount)
-
-	if dropOnComplete {
-		if dropErr := collection.Database.DropDatabase(); dropErr != nil {
-			return err
-		}
-		log.Logv(log.Always, "Database dropped success")
-	}
 
 	return nil
 }
