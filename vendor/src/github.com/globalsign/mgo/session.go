@@ -3183,29 +3183,6 @@ func (c *Collection) CreateCustomCosmosDB(info *CosmosDBCollectionInfo) error {
 	return c.Database.Run(cmd, nil)
 }
 
-// The CosmosDBCollectionInfo type holds metadata about a CosmosDB collection.
-type CosmosDBCollectionInfo struct {
-	ShardKey   string
-	Throughput int
-}
-
-// CreateCustomCosmosDB explicitly creates the c collection for
-// Azure CosmosDB, allowing the specification of throughput and shard keys
-func (c *Collection) CreateCustomCosmosDB(info *CosmosDBCollectionInfo) error {
-	cmd := make(bson.D, 0, 4)
-	cmd = append(cmd, bson.DocElem{"customAction", "CreateCollection"})
-	cmd = append(cmd, bson.DocElem{"collection", c.Name})
-
-	//TODO: Validate the throughput range for Fixed & Unlimited collections
-	cmd = append(cmd, bson.DocElem{"offerThroughput", info.Throughput})
-
-	//TODO: Validate the shardkey to be in an acceptable format
-	if info.ShardKey != "" {
-		cmd = append(cmd, bson.DocElem{"shardKey", info.ShardKey})
-	}
-	return c.Database.Run(cmd, nil)
-}
-
 func (c *Collection) GetLastRequestStatistics() (charge int64, err error) {
 	var result bson.D
 
