@@ -2855,6 +2855,18 @@ func (c *Collection) Insert(docs ...interface{}) error {
 	return err
 }
 
+// Insert with the insert op directly (For performance)
+func (c *Collection) InsertWithOp(op *InsertOperation) (latency int64, err error) {
+	startTime := time.Now()
+	_, err = c.writeOp(op.Op, true)
+	endTime := time.Now()
+	latency = endTime.Sub(startTime).Nanoseconds() / 1000
+	if err != nil {
+		return -1, err
+	}
+	return latency, err
+}
+
 // Update finds a single document matching the provided selector document
 // and modifies it according to the update document.
 // If the session is in safe mode (see SetSafe) a ErrNotFound error is
@@ -3167,7 +3179,44 @@ func (c *Collection) CreateCustomCosmosDB(info *CosmosDBCollectionInfo) error {
 	if info.ShardKey != "" {
 		cmd = append(cmd, bson.DocElem{"shardKey", info.ShardKey})
 	}
+
 	return c.Database.Run(cmd, nil)
+}
+
+// The CosmosDBCollectionInfo type holds metadata about a CosmosDB collection.
+type CosmosDBCollectionInfo struct {
+	ShardKey   string
+	Throughput int
+}
+
+// CreateCustomCosmosDB explicitly creates the c collection for
+// Azure CosmosDB, allowing the specification of throughput and shard keys
+func (c *Collection) CreateCustomCosmosDB(info *CosmosDBCollectionInfo) error {
+	cmd := make(bson.D, 0, 4)
+	cmd = append(cmd, bson.DocElem{"customAction", "CreateCollection"})
+	cmd = append(cmd, bson.DocElem{"collection", c.Name})
+
+	//TODO: Validate the throughput range for Fixed & Unlimited collections
+	cmd = append(cmd, bson.DocElem{"offerThroughput", info.Throughput})
+
+	//TODO: Validate the shardkey to be in an acceptable format
+	if info.ShardKey != "" {
+		cmd = append(cmd, bson.DocElem{"shardKey", info.ShardKey})
+	}
+	return c.Database.Run(cmd, nil)
+}
+
+func (c *Collection) GetLastRequestStatistics() (charge int64, err error) {
+	var result bson.D
+
+	cmd := make(bson.D, 0, 4)
+	cmd = append(cmd, bson.DocElem{"getLastRequestStatistics", "1"})
+
+	err = c.Database.Run(cmd, &result)
+	m := result.Map()
+	charge = int64(math.Ceil(m["RequestCharge"].(float64)))
+
+	return charge, err
 }
 
 // Batch sets the batch size used when fetching documents from the database.

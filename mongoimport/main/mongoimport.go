@@ -59,13 +59,13 @@ func main() {
 	// verify uri options and log them
 	opts.URI.LogUnsupportedOptions()
 	for i := 0; i < ingestOpts.ImportCycle; i++ {
-		log.Logvf(log.Always, "Import cycle: %d", i)
+		log.Logvf(log.Info, "Import cycle: %d", i)
 		importCycle(opts, inputOpts, ingestOpts, args)
 	}
 }
 
 func importCycle(opts *options.ToolOptions, inputOpts *mongoimport.InputOptions, ingestOpts *mongoimport.IngestOptions, args []string) {
-	defer timeTrack(time.Now(), "importCycle")
+	defer timeTrack(time.Now(), "Import")
 	// create a session provider to connect to the db
 	sessionProvider, err := db.NewSessionProvider(*opts)
 	if err != nil {
@@ -97,14 +97,14 @@ func importCycle(opts *options.ToolOptions, inputOpts *mongoimport.InputOptions,
 		if numDocs != 1 {
 			message = fmt.Sprintf("imported %v documents", numDocs)
 		}
-		log.Logvf(log.Always, message)
+		log.Logvf(log.DebugLow, message)
 	}
 	if err != nil {
 		os.Exit(util.ExitError)
 	}
 
-	if err := m.OnFinish(ingestOpts.DropOnComplete); err != nil {
-		log.Logvf(log.Always, "Failed to cleanup: %v", err)
+	if err := m.CountDocumentsInCosmosDb(); err != nil {
+		log.Logvf(log.Always, "Unable to count the documents in the imported collection: %v", err)
 	}
 
 }

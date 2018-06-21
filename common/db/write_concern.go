@@ -7,11 +7,11 @@
 package db
 
 import (
+	"github.com/globalsign/mgo"
 	"github.com/mongodb/mongo-tools/common/connstring"
 	"github.com/mongodb/mongo-tools/common/json"
 	"github.com/mongodb/mongo-tools/common/log"
 	"github.com/mongodb/mongo-tools/common/util"
-	"github.com/globalsign/mgo"
 
 	"fmt"
 	"strconv"
@@ -169,7 +169,7 @@ func BuildWriteConcern(writeConcern string, nodeType NodeType, cs *connstring.Co
 	} else {
 		writeConcernStr = sessionSafety.W
 	}
-	log.Logvf(log.Info, "using write concern: %v='%v', %v=%v, %v=%v, %v=%v",
+	log.Logvf(log.DebugHigh, "using write concern: %v='%v', %v=%v, %v=%v, %v=%v",
 		w, writeConcernStr,
 		j, sessionSafety.J,
 		fSync, sessionSafety.FSync,

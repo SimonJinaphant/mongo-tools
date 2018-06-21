@@ -17,11 +17,11 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/globalsign/mgo/bson"
 	"github.com/mongodb/mongo-tools/common/bsonutil"
 	"github.com/mongodb/mongo-tools/common/db"
 	"github.com/mongodb/mongo-tools/common/log"
 	"github.com/mongodb/mongo-tools/common/util"
-	"github.com/globalsign/mgo/bson"
 	"gopkg.in/tomb.v2"
 )
 
@@ -248,7 +248,7 @@ func filterIngestError(stopOnError bool, err error) error {
 	if stopOnError || db.IsConnectionError(err) {
 		return err
 	}
-	log.Logvf(log.Always, "error inserting documents: %v", err)
+	//log.Logvf(log.Always, "error inserting documents: %v", err)
 	return nil
 }
 
