@@ -45,7 +45,6 @@ import (
 	"time"
 
 	"github.com/globalsign/mgo/bson"
-	logger "github.com/mongodb/mongo-tools/common/log"
 )
 
 // Mode read preference mode. See Eventual, Monotonic and Strong for details
