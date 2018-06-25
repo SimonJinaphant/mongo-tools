@@ -9,9 +9,9 @@ import (
 )
 
 const (
-	CSV  = "csv"
-	TSV  = "tsv"
-	JSON = "json"
+	opDeadlineMs              = 5000
+	Error_RequestRateTooLarge = 16500
+	Error_MalformedRequest    = 9
 )
 
 type CosmosDbInserter struct {
@@ -27,7 +27,7 @@ func NewCosmosDbInserter(collection *mgo.Collection) *CosmosDbInserter {
 func (ci *CosmosDbInserter) Insert(doc interface{}, manager *HiringManager, workerId int) error {
 	// Prevent the retry from re-creating the insertOp object again by explicitly storing it
 	insertOperation := mgo.CreateInsertOp(ci.collection.FullName, doc.(bson.D))
-	opDeadline := time.Now().Add(5 * time.Second)
+	opDeadline := time.Now().Add(opDeadlineMs * time.Millisecond)
 
 retry:
 	latency, err := ci.collection.InsertWithOp(insertOperation)
@@ -35,8 +35,7 @@ retry:
 		if qerr, ok := err.(*mgo.QueryError); ok {
 			switch qerr.Code {
 
-			// TooManyRequest
-			case 16500:
+			case Error_RequestRateTooLarge:
 				manager.NotifyRateLimit()
 				//log.Logvf(log.Always, "We're overloading Cosmos DB; let's wait")
 				time.Sleep(5 * time.Millisecond)
@@ -47,8 +46,7 @@ retry:
 					goto retry
 				}
 
-			// Malformed Request
-			case 9:
+			case Error_MalformedRequest:
 				log.Logv(log.Always, "The request sent was malformed")
 
 			default:

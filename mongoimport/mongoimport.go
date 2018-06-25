@@ -8,8 +8,6 @@
 package mongoimport
 
 import (
-	"runtime"
-
 	"github.com/globalsign/mgo"
 	"github.com/globalsign/mgo/bson"
 	"github.com/mongodb/mongo-tools/common/cosmosdb"
@@ -26,7 +24,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
-	"time"
 )
 
 // Input format types accepted by mongoimport.
@@ -391,22 +388,23 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 		}
 	}
 
-	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
-	errCosmosCol := collection.CreateCustomCosmosDB(&mgo.CosmosDBCollectionInfo{
-		Throughput: imp.IngestOptions.Throughput,
-		ShardKey:   imp.IngestOptions.ShardKey,
-	})
-	collection.Database.Session.Close()
+	if strings.Contains(connURL, ".documents.azure.com") {
+		log.Logvf(log.Info, "We're targetting a Cosmos DB URI, let's create a custom collection")
 
-	cooldownTimer := time.NewTimer(time.Duration(1) * time.Second)
-	<-cooldownTimer.C
+		collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
+		err := cosmosdb.CreateCustomCosmosDB(cosmosdb.CosmosDBCollectionInfo{
+			Throughput: imp.IngestOptions.Throughput,
+			ShardKey:   imp.IngestOptions.ShardKey,
+		}, collection)
+		collection.Database.Session.Close()
 
-	//TODO: Define scenario where we want to change the throughput of an existing collection...
-	if errCosmosCol != nil {
-		// TODO: Tell the use --drop
-		log.Logvf(log.Always, "Unable to create collection: %s", collection.Name)
-		return 0, errCosmosCol
+		if err != nil {
+			log.Logvf(log.Always, "Unable to create collection: %s", collection.Name)
+			log.Logv(log.Always, "If the collection already exist please re-run the tool with `--drop` to delete the pre-existing collection")
+			return 0, err
+		}
 	}
+
 	readDocs := make(chan bson.D, workerBufferSize)
 	processingErrChan := make(chan error)
 	ordered := imp.IngestOptions.MaintainInsertionOrder
@@ -430,9 +428,6 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 // into the target collection. It spreads the insert/upsert workload across one
 // or more workers.
 func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
-	if imp.IngestOptions.NumInsertionWorkers < runtime.NumCPU() {
-		imp.IngestOptions.NumInsertionWorkers = runtime.NumCPU() * 2
-	}
 	numInsertionWorkers := imp.IngestOptions.NumInsertionWorkers
 	log.Logvf(log.Info, "Assigning %d insertion workers", numInsertionWorkers)
 
