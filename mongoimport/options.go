@@ -86,18 +86,6 @@ type IngestOptions struct {
 	NumDecodingWorkers int `long:"numDecodingWorkers" default:"0" hidden:"true"`
 
 	BulkBufferSize int `long:"batchSize" value-name:"<number>" default:"1" hidden:"true"`
-
-	// Indicate the amount of throughput to set the Azure CosmosDB collections to
-	Throughput int `long:"throughput" value-name:"<number>" default:"10000" description:"Throughput to set on a CosmosDB collection"`
-
-	// Specify the Shard key for Azure CosmosDB to perform sharding with
-	ShardKey string `long:"shardKey" value-name:"<field>" description:"Shard key for CosmosDB; specifying this key will set the collection size to be 'Unlimited' instead of 'Fixed', which also raises the maximum RU from 10k to 50k"`
-
-	// For testing purposes; be later removed
-	ImportCycle int `long:"importCycle" value-name:"<number>" default:"1" hidden:"true" description:"Repeat the import cycle <num> amount of times"`
-
-	// Flag for adaptive insertion worker scaling
-	AutoScaleWorkers bool `long:"autoScaleWorkers" default:"false" description:"Enable the scale up of Insertion workers"`
 }
 
 // Name returns a description of the IngestOptions struct.

@@ -58,7 +58,7 @@ func main() {
 
 	// verify uri options and log them
 	opts.URI.LogUnsupportedOptions()
-	for i := 0; i < ingestOpts.ImportCycle; i++ {
+	for i := 0; i < opts.ImportCycle; i++ {
 		log.Logvf(log.Info, "Import cycle: %d", i)
 		importCycle(opts, inputOpts, ingestOpts, args)
 	}

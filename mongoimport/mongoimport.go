@@ -228,7 +228,7 @@ func (imp *MongoImport) ValidateSettings(args []string) error {
 	}
 
 	// For testing purposes, make sure to drop the database if we're cycling
-	if imp.IngestOptions.ImportCycle > 1 {
+	if imp.ToolOptions.General.ImportCycle > 1 {
 		imp.IngestOptions.Drop = true
 	}
 
@@ -393,8 +393,8 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 
 		collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
 		err := cosmosdb.CreateCustomCosmosDB(cosmosdb.CosmosDBCollectionInfo{
-			Throughput: imp.IngestOptions.Throughput,
-			ShardKey:   imp.IngestOptions.ShardKey,
+			Throughput: imp.ToolOptions.General.Throughput,
+			ShardKey:   imp.ToolOptions.General.ShardKey,
 		}, collection)
 		collection.Database.Session.Close()
 
@@ -431,7 +431,7 @@ func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
 	numInsertionWorkers := imp.IngestOptions.NumInsertionWorkers
 	log.Logvf(log.Info, "Assigning %d insertion workers", numInsertionWorkers)
 
-	manager := cosmosdb.NewHiringManager(numInsertionWorkers, imp.IngestOptions.Throughput)
+	manager := cosmosdb.NewHiringManager(numInsertionWorkers, imp.ToolOptions.General.Throughput)
 	manager.Action = cosmosdb.AddWorkerAction(func(hm *cosmosdb.HiringManager, workerId int) {
 		err := imp.runInsertionWorker(readDocs, hm, workerId)
 		if err != nil {
@@ -439,7 +439,7 @@ func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
 		}
 	})
 
-	manager.Start(numInsertionWorkers, imp.IngestOptions.AutoScaleWorkers)
+	manager.Start(numInsertionWorkers, imp.ToolOptions.General.AutoScaleWorkers)
 	manager.AwaitAllWorkers()
 	return
 }

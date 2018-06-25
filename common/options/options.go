@@ -98,6 +98,18 @@ type General struct {
 
 	MaxProcs   int    `long:"numThreads" hidden:"true"`
 	Failpoints string `long:"failpoints" hidden:"true"`
+
+	// Indicate the amount of throughput to set the Azure CosmosDB collections to
+	Throughput int `long:"throughput" value-name:"<number>" default:"10000" description:"Throughput to set on a CosmosDB collection"`
+
+	// Specify the Shard key for Azure CosmosDB to perform sharding with
+	ShardKey string `long:"shardKey" value-name:"<field>" description:"Shard key for CosmosDB; specifying this key will set the collection size to be 'Unlimited' instead of 'Fixed', which also raises the maximum RU from 10k to 50k"`
+
+	// For testing purposes; be later removed
+	ImportCycle int `long:"importCycle" value-name:"<number>" default:"1" hidden:"true" description:"Repeat the import cycle <num> amount of times"`
+
+	// Flag for adaptive insertion worker scaling
+	AutoScaleWorkers bool `long:"autoScaleWorkers" default:"false" description:"Enable the scale up of Insertion workers"`
 }
 
 // Struct holding verbosity-related options
