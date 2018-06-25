@@ -10,6 +10,8 @@ import (
 	"encoding/hex"
 	"fmt"
 
+	"github.com/globalsign/mgo"
+	"github.com/globalsign/mgo/bson"
 	"github.com/mongodb/mongo-tools/common"
 	"github.com/mongodb/mongo-tools/common/bsonutil"
 	"github.com/mongodb/mongo-tools/common/db"
@@ -17,8 +19,6 @@ import (
 	"github.com/mongodb/mongo-tools/common/json"
 	"github.com/mongodb/mongo-tools/common/log"
 	"github.com/mongodb/mongo-tools/common/util"
-	"github.com/globalsign/mgo"
-	"github.com/globalsign/mgo/bson"
 )
 
 // Specially treated restore collection types.
@@ -278,6 +278,7 @@ func (restore *MongoRestore) CreateCollection(intent *intents.Intent, options bs
 }
 
 func (restore *MongoRestore) createCollectionWithCommand(session *mgo.Session, intent *intents.Intent, options bson.D) error {
+	fmt.Println("WithCommand")
 	command := createCollectionCommand(intent, options)
 	res := bson.M{}
 	err := session.DB(intent.DB).Run(command, &res)
@@ -292,6 +293,7 @@ func (restore *MongoRestore) createCollectionWithCommand(session *mgo.Session, i
 }
 
 func (restore *MongoRestore) createCollectionWithApplyOps(session *mgo.Session, intent *intents.Intent, options bson.D, uuidHex string) error {
+	fmt.Println("WithApplyOps")
 	command := createCollectionCommand(intent, options)
 	uuid, err := hex.DecodeString(uuidHex)
 	if err != nil {
