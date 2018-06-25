@@ -196,9 +196,7 @@ func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
 	if !collectionExists {
 		log.Logvf(log.Info, "creating collection %v %s", intent.Namespace(), logMessageSuffix)
 		log.Logvf(log.DebugHigh, "using collection options: %#v", options)
-		//err = restore.CreateCollection(intent, options, uuid)
 		if strings.Contains(restore.ToolOptions.Host, ".documents.azure.com") {
-			log.Logvf(log.Info, "UUID: %s", uuid)
 			log.Logvf(log.Info, "We're targetting a Cosmos DB URI, let's create a custom collection")
 			session, _ := restore.SessionProvider.GetSession()
 			collection := session.DB(intent.DB).C(intent.C)
@@ -213,9 +211,11 @@ func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
 				log.Logv(log.Always, "If the collection already exist please re-run the tool with `--drop` to delete the pre-existing collection")
 				return err
 			}
-		}
-		if err != nil {
-			return fmt.Errorf("error creating collection %v: %v", intent.Namespace(), err)
+		} else {
+			// TODO: Mongorestore seems to be creating collections with extra parameters, need to check if we need this as well
+			if err = restore.CreateCollection(intent, options, uuid); err != nil {
+				return fmt.Errorf("error creating collection %v: %v", intent.Namespace(), err)
+			}
 		}
 	} else {
 		log.Logvf(log.Info, "collection %v already exists - skipping collection create", intent.Namespace())
