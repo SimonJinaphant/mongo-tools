@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"github.com/globalsign/mgo"
-	"github.com/globalsign/mgo/bson"
 	"github.com/mongodb/mongo-tools/common/log"
 )
 
@@ -27,52 +26,11 @@ func NewCosmosDbInserter(collection *mgo.Collection) *CosmosDbInserter {
 
 func (ci *CosmosDbInserter) Insert(doc interface{}, manager *HiringManager, workerId int) error {
 	// Prevent the retry from re-creating the insertOp object again by explicitly storing it
-	insertOperation := mgo.CreateInsertOp(ci.collection.FullName, doc.(bson.D))
+	insertOperation := mgo.CreateInsertOp(ci.collection.FullName, doc)
 	opDeadline := time.Now().Add(opDeadlineMs * time.Millisecond)
 
 retry:
 	latency, err := ci.collection.InsertWithOp(insertOperation)
-	if err != nil {
-		if qerr, ok := err.(*mgo.QueryError); ok {
-			switch qerr.Code {
-			case Error_PartitionKey:
-				fallthrough
-			case Error_RequestRateTooLarge:
-				manager.NotifyRateLimit()
-				//log.Logvf(log.Always, "We're overloading Cosmos DB; let's wait")
-				time.Sleep(5 * time.Millisecond)
-
-				if time.Now().After(opDeadline) {
-					log.Logv(log.Always, "Maximum throughput retry exceeded 5 seconds; moving on")
-				} else {
-					goto retry
-				}
-
-			case Error_MalformedRequest:
-				log.Logv(log.Always, "The request sent was malformed")
-
-			default:
-				log.Logvf(log.Always, "Unknown QueryError code: %s", err)
-			}
-		} else {
-			log.Logvf(log.Always, "Received something that is not a QueryError: %v", err)
-		}
-	} else {
-		if manager.CanNotify(workerId) {
-			insertCharge, _ := ci.collection.GetLastRequestStatistics()
-			manager.Notify(workerId, latency, insertCharge)
-		}
-	}
-	return err
-}
-
-func (ci *CosmosDbInserter) InsertRaw(doc interface{}) error {
-	// Prevent the retry from re-creating the insertOp object again by explicitly storing it
-	insertOperation := mgo.CreateInsertOp(ci.collection.FullName, doc.(bson.Raw))
-	opDeadline := time.Now().Add(opDeadlineMs * time.Millisecond)
-
-retry:
-	_, err := ci.collection.InsertWithOp(insertOperation)
 	if err != nil {
 		if qerr, ok := err.(*mgo.QueryError); ok {
 			switch qerr.Code {
@@ -97,6 +55,11 @@ retry:
 			}
 		} else {
 			log.Logvf(log.Always, "Received something that is not a QueryError: %v", err)
+		}
+	} else {
+		if manager.CanNotify(workerId) {
+			insertCharge, _ := ci.collection.GetLastRequestStatistics()
+			manager.Notify(workerId, latency, insertCharge)
 		}
 	}
 	return err

@@ -8,9 +8,9 @@ package mongorestore
 
 import (
 	"fmt"
+	"io"
 	"io/ioutil"
 	"strings"
-	"time"
 
 	"github.com/globalsign/mgo/bson"
 	"github.com/mongodb/mongo-tools/common/cosmosdb"
@@ -296,7 +296,6 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 				log.Logvf(log.Always, "terminating read on %v.%v", dbName, colName)
 				termErr = util.ErrTerminated
 				close(docChan)
-				log.Logv(log.Info, "docChan terminated")
 				return
 			default:
 				rawBytes := make([]byte, len(doc.Data))
@@ -306,21 +305,26 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 			}
 		}
 		close(docChan)
-		log.Logv(log.Info, "docChan closed")
 	}()
 
 	log.Logvf(log.Info, "using %v insertion workers", maxInsertWorkers)
 
-	for i := 0; i < maxInsertWorkers; i++ {
-		go func() {
-			// get a session copy for each insert worker
-			s := session.Copy()
-			defer s.Close()
+	manager := cosmosdb.NewHiringManager(maxInsertWorkers, restore.ToolOptions.General.Throughput)
+	manager.Action = cosmosdb.AddWorkerAction(func(hm *cosmosdb.HiringManager, workerId int) {
 
-			coll := collection.With(s)
-			//bulk := db.NewBufferedBulkInserter(coll, 1, !restore.OutputOptions.StopOnError)
-			inserter := cosmosdb.NewCosmosDbInserter(coll)
-			for rawDoc := range docChan {
+		s := session.Copy()
+		defer s.Close()
+		coll := collection.With(s)
+		inserter := cosmosdb.NewCosmosDbInserter(coll)
+
+		for {
+			select {
+			case rawDoc, alive := <-docChan:
+				if !alive {
+					log.Logvf(log.DebugLow, "Worker %d no more documents to ingest", workerId)
+					return
+				}
+
 				if restore.objCheck {
 					err := bson.Unmarshal(rawDoc.Data, &bson.D{})
 					if err != nil {
@@ -328,45 +332,39 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 						return
 					}
 				}
-				if err := inserter.InsertRaw(rawDoc); err != nil {
-					if db.IsConnectionError(err) || restore.OutputOptions.StopOnError {
-						// Propagate this error, since it's either a fatal connection error
-						// or the user has turned on --stopOnError
-						resultChan <- err
-					} else {
-						// Otherwise just log the error but don't propagate it.
-						log.Logvf(log.Always, "error: %v", err)
-					}
+
+				err := filterIngestError(restore.OutputOptions.StopOnError, inserter.Insert(rawDoc, hm, workerId))
+				if err != nil {
+					return
 				}
-				watchProgressor.Set(file.Pos())
+
+			case <-restore.termChan:
+				log.Logvf(log.Always, "Worker %d recieved termination signal, stopping now", workerId)
+				return
 			}
-			/*err := bulk.Flush()
-			if err != nil {
-				if !db.IsConnectionError(err) && !restore.OutputOptions.StopOnError {
-					// Suppress this error since it's not a severe connection error and
-					// the user has not specified --stopOnError
-					log.Logvf(log.Always, "error: %v", err)
-					err = nil
-				}
-			}*/
-			resultChan <- err
-			return
-		}()
-
-		// sleep to prevent all threads from inserting at the same time at start
-		time.Sleep(time.Duration(i) * 10 * time.Millisecond)
-	}
-
-	// wait until all insert jobs finish
-	for done := 0; done < maxInsertWorkers; done++ {
-		err := <-resultChan
-		if err != nil {
-			return int64(0), fmt.Errorf("insertion error: %v", err)
+			watchProgressor.Set(file.Pos())
 		}
-	}
+	})
+
+	manager.Start(maxInsertWorkers, restore.ToolOptions.General.AutoScaleWorkers)
+	manager.AwaitAllWorkers()
+
 	// final error check
 	if err = bsonSource.Err(); err != nil {
 		return int64(0), fmt.Errorf("reading bson input: %v", err)
 	}
 	return documentCount, termErr
+}
+
+func filterIngestError(stopOnError bool, err error) error {
+	if err == nil {
+		return nil
+	}
+	if err.Error() == io.EOF.Error() {
+		return fmt.Errorf(db.ErrLostConnection)
+	}
+	if stopOnError || db.IsConnectionError(err) {
+		return err
+	}
+	return nil
 }
