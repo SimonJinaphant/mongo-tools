@@ -324,7 +324,7 @@ func (b *Bulk) runInsert(action *bulkAction, result *BulkResult, berr *BulkError
 	if !b.ordered {
 		op.flags = 1 // ContinueOnError
 	}
-	lerr, err := b.c.RetryableWriteOp(op, b.ordered)
+	lerr, err := b.c.writeOp(op, b.ordered)
 	return b.checkSuccess(action, berr, lerr, err)
 }
 
