@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"github.com/globalsign/mgo"
-	"github.com/globalsign/mgo/bson"
 	"github.com/mongodb/mongo-tools/common/log"
 )
 
@@ -12,6 +11,7 @@ const (
 	opDeadlineMs              = 5000
 	Error_RequestRateTooLarge = 16500
 	Error_MalformedRequest    = 9
+	Error_PartitionKey        = 2
 )
 
 type CosmosDbInserter struct {
@@ -26,7 +26,7 @@ func NewCosmosDbInserter(collection *mgo.Collection) *CosmosDbInserter {
 
 func (ci *CosmosDbInserter) Insert(doc interface{}, manager *HiringManager, workerId int) error {
 	// Prevent the retry from re-creating the insertOp object again by explicitly storing it
-	insertOperation := mgo.CreateInsertOp(ci.collection.FullName, doc.(bson.D))
+	insertOperation := mgo.CreateInsertOp(ci.collection.FullName, doc)
 	opDeadline := time.Now().Add(opDeadlineMs * time.Millisecond)
 
 retry:
@@ -34,9 +34,10 @@ retry:
 	if err != nil {
 		if qerr, ok := err.(*mgo.QueryError); ok {
 			switch qerr.Code {
-
+			case Error_PartitionKey:
+				time.Sleep(50 * time.Millisecond)
+				fallthrough
 			case Error_RequestRateTooLarge:
-				manager.NotifyRateLimit()
 				//log.Logvf(log.Always, "We're overloading Cosmos DB; let's wait")
 				time.Sleep(5 * time.Millisecond)
 
