@@ -45,10 +45,12 @@ func (h *HiringManager) CountWorkers() int {
 	return h.workerCount
 }
 
+// CanNotify is invoked from the workers to check if it's allowed to notify new information
 func (h *HiringManager) CanNotify(workerId int) bool {
 	return atomic.LoadInt64(&h.latencyRecords[workerId]) == -1
 }
 
+// Notify is invoked from the workers to provide the manager with information it needs to calculate whether we can go faster or not
 func (h *HiringManager) Notify(workerId int, latency int64, charge int64) {
 	if latency < 0 {
 		return
@@ -58,6 +60,7 @@ func (h *HiringManager) Notify(workerId int, latency int64, charge int64) {
 	atomic.StoreInt64(&h.consumptionRecords[workerId], charge)
 }
 
+// Start launches the manager routine which periodically checks whether it can add new workers to speed up the ingestion task
 func (h *HiringManager) Start(n int, autoScaleWorkers bool) {
 	for i := 0; i < n; i++ {
 		h.HireNewWorker()
@@ -71,9 +74,6 @@ func (h *HiringManager) Start(n int, autoScaleWorkers bool) {
 
 		for {
 			time.Sleep(sleepTime)
-			/*if !imp.Alive() {
-				return
-			}*/
 
 			h.recordWg.Add(h.workerCount)
 			for i := 0; i < h.workerCount; i++ {
@@ -110,9 +110,7 @@ func (h *HiringManager) Start(n int, autoScaleWorkers bool) {
 
 		for {
 			time.Sleep(5 * time.Second)
-			/*if !imp.Alive() {
-				return
-			}*/
+
 			if h.WasRecentlyRateLimited() {
 				continue
 			}
@@ -123,6 +121,7 @@ func (h *HiringManager) Start(n int, autoScaleWorkers bool) {
 	}()
 }
 
+// HireNewWorker launches a new parallel worker to help with the ingestion work
 func (h *HiringManager) HireNewWorker() {
 	h.latencyRecords = append(h.latencyRecords, 0)
 	h.consumptionRecords = append(h.consumptionRecords, 0)
@@ -136,10 +135,12 @@ func (h *HiringManager) HireNewWorker() {
 	}()
 }
 
+//NotifyRateLimit is to be invoked from worker to notify the manager to stop adding new workers
 func (h *HiringManager) NotifyRateLimit() {
 	atomic.AddInt64(&h.rateLimitCounter, 1)
 }
 
+// WasRecentlyRateLimited is invoked from the manager to check if a worker has reported a RateLimit error since the last time it checked.
 func (h *HiringManager) WasRecentlyRateLimited() bool {
 	limitCount := atomic.LoadInt64(&h.rateLimitCounter)
 	atomic.StoreInt64(&h.rateLimitCounter, 0)
