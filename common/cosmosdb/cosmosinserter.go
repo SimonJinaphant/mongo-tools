@@ -38,6 +38,7 @@ retry:
 				time.Sleep(50 * time.Millisecond)
 				fallthrough
 			case Error_RequestRateTooLarge:
+				manager.NotifyRateLimit()
 				//log.Logvf(log.Always, "We're overloading Cosmos DB; let's wait")
 				time.Sleep(5 * time.Millisecond)
 

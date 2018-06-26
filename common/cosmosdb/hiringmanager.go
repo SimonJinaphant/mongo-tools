@@ -109,9 +109,11 @@ func (h *HiringManager) Start(n int, autoScaleWorkers bool) {
 		log.Logv(log.Info, "Hiring manager has stopped mass hiring; switching to single hire")
 
 		for {
+			// The Hiring manager is vulnerable to sudden changes, need further work on this.
 			time.Sleep(5 * time.Second)
 
 			if h.WasRecentlyRateLimited() {
+				time.Sleep(10 * time.Second)
 				continue
 			}
 
