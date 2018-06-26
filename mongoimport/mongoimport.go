@@ -8,11 +8,9 @@
 package mongoimport
 
 import (
-	"math"
-	"runtime"
-
 	"github.com/globalsign/mgo"
 	"github.com/globalsign/mgo/bson"
+	"github.com/mongodb/mongo-tools/common/cosmosdb"
 	"github.com/mongodb/mongo-tools/common/db"
 	"github.com/mongodb/mongo-tools/common/log"
 	"github.com/mongodb/mongo-tools/common/options"
@@ -25,9 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
-	"time"
 )
 
 // Input format types accepted by mongoimport.
@@ -232,7 +228,7 @@ func (imp *MongoImport) ValidateSettings(args []string) error {
 	}
 
 	// For testing purposes, make sure to drop the database if we're cycling
-	if imp.IngestOptions.ImportCycle > 1 {
+	if imp.ToolOptions.General.ImportCycle > 1 {
 		imp.IngestOptions.Drop = true
 	}
 
@@ -392,22 +388,23 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 		}
 	}
 
-	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
-	errCosmosCol := collection.CreateCustomCosmosDB(&mgo.CosmosDBCollectionInfo{
-		Throughput: imp.IngestOptions.Throughput,
-		ShardKey:   imp.IngestOptions.ShardKey,
-	})
-	collection.Database.Session.Close()
+	if strings.Contains(connURL, ".documents.azure.com") {
+		log.Logvf(log.Info, "We're targetting a Cosmos DB URI, let's create a custom collection")
 
-	cooldownTimer := time.NewTimer(time.Duration(1) * time.Second)
-	<-cooldownTimer.C
+		collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
+		err := cosmosdb.CreateCustomCosmosDB(cosmosdb.CosmosDBCollectionInfo{
+			Throughput: imp.ToolOptions.General.Throughput,
+			ShardKey:   imp.ToolOptions.General.ShardKey,
+		}, collection)
+		collection.Database.Session.Close()
 
-	//TODO: Define scenario where we want to change the throughput of an existing collection...
-	if errCosmosCol != nil {
-		// TODO: Tell the use --drop
-		log.Logvf(log.Always, "Unable to create collection: %s", collection.Name)
-		return 0, errCosmosCol
+		if err != nil {
+			log.Logvf(log.Always, "Unable to create collection: %s", collection.Name)
+			log.Logv(log.Always, "If the collection already exist please re-run the tool with `--drop` to delete the pre-existing collection")
+			return 0, err
+		}
 	}
+
 	readDocs := make(chan bson.D, workerBufferSize)
 	processingErrChan := make(chan error)
 	ordered := imp.IngestOptions.MaintainInsertionOrder
@@ -427,165 +424,22 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 	return insertionCount, e1
 }
 
-type AddWorkerAction func(h *HiringManager, a int)
-
-type HiringManager struct {
-	latencyRecords     []int64
-	consumptionRecords []int64
-
-	rateLimitCounter int64
-	workerCount      int
-	throughput       int
-
-	workerWg *sync.WaitGroup
-	recordWg *sync.WaitGroup
-	Action   AddWorkerAction
-}
-
-func NewHiringManager(defaultWorkers int, throughput int) *HiringManager {
-	return &HiringManager{
-		latencyRecords:     make([]int64, 0, defaultWorkers),
-		consumptionRecords: make([]int64, 0, defaultWorkers),
-		rateLimitCounter:   0,
-		workerCount:        0,
-		throughput:         throughput,
-		workerWg:           new(sync.WaitGroup),
-		recordWg:           new(sync.WaitGroup),
-		Action:             nil,
-	}
-}
-
-func (h *HiringManager) AwaitAllWorkers() {
-	h.workerWg.Wait()
-}
-
-func (h *HiringManager) CountWorkers() int {
-	return h.workerCount
-}
-
-func (h *HiringManager) CanNotify(workerId int) bool {
-	return atomic.LoadInt64(&h.latencyRecords[workerId]) == -1
-}
-
-func (h *HiringManager) Notify(workerId int, latency int64, charge int64) {
-	if latency < 0 {
-		return
-	}
-	defer h.recordWg.Done()
-	atomic.StoreInt64(&h.latencyRecords[workerId], latency)
-	atomic.StoreInt64(&h.consumptionRecords[workerId], charge)
-}
-
-func (h *HiringManager) Start(n int, imp *MongoImport) {
-	for i := 0; i < n; i++ {
-		h.HireNewWorker()
-	}
-	if !imp.IngestOptions.AutoScaleWorkers {
-		log.Logv(log.Info, "Auto Scaling of Insertion Workers is not enable in this run")
-		return
-	}
-	go func() {
-		sleepTime := 5 * time.Second
-
-		for {
-			time.Sleep(sleepTime)
-			if !imp.Alive() {
-				return
-			}
-
-			h.recordWg.Add(h.workerCount)
-			for i := 0; i < h.workerCount; i++ {
-				atomic.StoreInt64(&h.latencyRecords[i], -1)
-				atomic.StoreInt64(&h.consumptionRecords[i], -1)
-			}
-			h.recordWg.Wait()
-
-			var latencySum int64
-			var chargeSum int64
-			for i := 0; i < h.workerCount; i++ {
-				latencySum += atomic.LoadInt64(&h.latencyRecords[i])
-				chargeSum += atomic.LoadInt64(&h.consumptionRecords[i])
-			}
-			averageLatency := latencySum / int64(h.workerCount)
-			averageCharge := chargeSum / int64(h.workerCount)
-			log.Logvf(log.Info, "On average, insertions took %d (ns) and consumed %d RU", averageLatency, averageCharge)
-
-			amount := int(math.Ceil((float64(h.throughput) * float64(averageLatency) / 1000000.0) / float64(averageCharge)))
-			amountToHire := (amount - h.workerCount) / 2
-			log.Logvf(log.Info, "Target workers %d | Hiring %d", amount, amountToHire)
-			if amountToHire <= 0 || amountToHire > 100 || h.WasRecentlyRateLimited() {
-				break
-			}
-
-			for i := 0; i < amountToHire; i++ {
-				h.HireNewWorker()
-			}
-			log.Logvf(log.Info, "Manager thinks we can move faster; there are now %d workers", h.workerCount)
-			sleepTime = sleepTime + (3 * time.Second)
-		}
-
-		log.Logv(log.Info, "Hiring manager has stopped mass hiring; switching to single hire")
-
-		for {
-			time.Sleep(5 * time.Second)
-			if !imp.Alive() {
-				return
-			}
-			if h.WasRecentlyRateLimited() {
-				continue
-			}
-
-			h.HireNewWorker()
-			log.Logvf(log.Info, "Manager thinks we can move a bit faster; there are now %d workers", h.workerCount)
-		}
-	}()
-}
-
-func (h *HiringManager) HireNewWorker() {
-	h.latencyRecords = append(h.latencyRecords, 0)
-	h.consumptionRecords = append(h.consumptionRecords, 0)
-	newWorkerID := h.workerCount
-	h.workerCount++
-
-	h.workerWg.Add(1)
-	go func() {
-		defer h.workerWg.Done()
-		h.Action(h, newWorkerID)
-	}()
-}
-
-func (h *HiringManager) NotifyRateLimit() {
-	atomic.AddInt64(&h.rateLimitCounter, 1)
-}
-
-func (h *HiringManager) WasRecentlyRateLimited() bool {
-	limitCount := atomic.LoadInt64(&h.rateLimitCounter)
-	atomic.StoreInt64(&h.rateLimitCounter, 0)
-	if limitCount > 0 {
-		log.Logvf(log.Info, "There was %d `Request rate too large` responses, no extra workers are needed", limitCount)
-		return true
-	}
-	return false
-}
-
 // ingestDocuments accepts a channel from which it reads documents to be inserted
 // into the target collection. It spreads the insert/upsert workload across one
 // or more workers.
 func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
-	if imp.IngestOptions.NumInsertionWorkers < runtime.NumCPU() {
-		imp.IngestOptions.NumInsertionWorkers = runtime.NumCPU() * 2
-	}
 	numInsertionWorkers := imp.IngestOptions.NumInsertionWorkers
 	log.Logvf(log.Info, "Assigning %d insertion workers", numInsertionWorkers)
 
-	manager := NewHiringManager(numInsertionWorkers, imp.IngestOptions.Throughput)
-	manager.Action = AddWorkerAction(func(hm *HiringManager, workerId int) {
+	manager := cosmosdb.NewHiringManager(numInsertionWorkers, imp.ToolOptions.General.Throughput)
+	manager.Action = cosmosdb.AddWorkerAction(func(hm *cosmosdb.HiringManager, workerId int) {
 		err := imp.runInsertionWorker(readDocs, hm, workerId)
 		if err != nil {
 			imp.Kill(err)
 		}
 	})
-	manager.Start(numInsertionWorkers, imp)
+
+	manager.Start(numInsertionWorkers, imp.ToolOptions.General.AutoScaleWorkers)
 	manager.AwaitAllWorkers()
 	return
 }
@@ -618,7 +472,7 @@ type flushInserter interface {
 
 // runInsertionWorker is a helper to InsertDocuments - it reads document off
 // the read channel and prepares then in batches for insertion into the databas
-func (imp *MongoImport) runInsertionWorker(readDocs chan bson.D, manager *HiringManager, workerId int) (err error) {
+func (imp *MongoImport) runInsertionWorker(readDocs chan bson.D, manager *cosmosdb.HiringManager, workerId int) (err error) {
 	session, err := imp.SessionProvider.GetSession()
 	if err != nil {
 		return fmt.Errorf("error connecting to mongod: %v", err)
@@ -628,7 +482,7 @@ func (imp *MongoImport) runInsertionWorker(readDocs chan bson.D, manager *Hiring
 		return fmt.Errorf("error configuring session: %v", err)
 	}
 	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
-	inserter := imp.newCosmosDbInserter(collection)
+	inserter := cosmosdb.NewCosmosDbInserter(collection)
 
 readLoop:
 	for {
@@ -662,66 +516,6 @@ readLoop:
 		}
 	}
 	return filterIngestError(imp.IngestOptions.StopOnError, err)
-}
-
-type CosmosDbInserter struct {
-	imp        *MongoImport
-	collection *mgo.Collection
-}
-
-func (imp *MongoImport) newCosmosDbInserter(collection *mgo.Collection) *CosmosDbInserter {
-	return &CosmosDbInserter{
-		imp:        imp,
-		collection: collection,
-	}
-}
-
-func (ci *CosmosDbInserter) Insert(doc interface{}, manager *HiringManager, workerId int) error {
-	// Prevent the retry from re-creating the insertOp object again by explicitly storing it
-	insertOperation := mgo.CreateInsertOp(ci.collection.FullName, doc.(bson.D))
-	opDeadline := time.Now().Add(5 * time.Second)
-
-retry:
-	latency, err := ci.collection.InsertWithOp(insertOperation)
-	if err != nil {
-		if qerr, ok := err.(*mgo.QueryError); ok {
-			switch qerr.Code {
-
-			// TooManyRequest
-			case 16500:
-				manager.NotifyRateLimit()
-				//log.Logvf(log.Always, "We're overloading Cosmos DB; let's wait")
-				time.Sleep(5 * time.Millisecond)
-
-				if time.Now().After(opDeadline) {
-					log.Logv(log.Always, "Maximum throughput retry exceeded 5 seconds; moving on")
-				} else {
-					goto retry
-				}
-
-			// Malformed Request
-			case 9:
-				log.Logv(log.Always, "The request sent was malformed")
-
-			default:
-				log.Logvf(log.Always, "Unknown QueryError code: %s", err)
-			}
-		} else {
-			log.Logvf(log.Always, "Received something that is not a QueryError: %v", err)
-		}
-	} else {
-		if manager.CanNotify(workerId) {
-			insertCharge, _ := ci.collection.GetLastRequestStatistics()
-			manager.Notify(workerId, latency, insertCharge)
-		}
-	}
-	return err
-}
-
-// Flush is needed so that upserter implements flushInserter, but upserter
-// doesn't buffer anything so we don't need to do anything in Flush.
-func (ci *CosmosDbInserter) Flush() error {
-	return nil
 }
 
 type upserter struct {
