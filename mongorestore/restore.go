@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/ioutil"
 	"strings"
+	"time"
 
 	"github.com/globalsign/mgo/bson"
 	"github.com/mongodb/mongo-tools/common/cosmosdb"
@@ -109,6 +110,8 @@ func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
 				if err != nil {
 					return err // no context needed
 				}
+				log.Logv(log.Always, "Collection dropped!, let's wait 5 seconds to avoid caching issues")
+				time.Sleep(5 * time.Second)
 				collectionExists = false
 			}
 		} else {
@@ -352,7 +355,7 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 	manager.AwaitAllWorkers()
 	close(backupDocChan)
 	if len(backupDocChan) != 0 {
-		log.Logvf(log.Always, "Trying to insert backup documents")
+		log.Logvf(log.Always, "Trying to insert %d backup documents", len(backupDocChan))
 		s := session.Copy()
 		defer s.Close()
 		coll := collection.With(s)
@@ -369,12 +372,18 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 
 			err := filterIngestError(restore.OutputOptions.StopOnError, inserter.Insert(doc, manager, 1))
 			if err != nil {
-				break
+				continue
 			}
 		}
 	}
-
-	// final error check
+	s := session.Copy()
+	defer s.Close()
+	coll := collection.With(s)
+	docCount, countErr := coll.Count()
+	if countErr != nil {
+		return 0, err
+	}
+	log.Logvf(log.Always, "Collection: %s has a total of %d documents in Azure Cosmos DB", collection.Name, docCount) // final error check
 	if err = bsonSource.Err(); err != nil {
 		return int64(0), fmt.Errorf("reading bson input: %v", err)
 	}
@@ -388,11 +397,11 @@ func filterIngestError(stopOnError bool, err error) error {
 	if err.Error() == io.EOF.Error() {
 		return fmt.Errorf(db.ErrLostConnection)
 	}
-	if stopOnError || db.IsConnectionError(err) {
+	if strings.Contains(err.Error(), "closed") {
+		log.Logvf(log.Always, "Got a connection closed, trying to recover by letting another socket do the work")
 		return err
 	}
-	if strings.Contains(err.Error(), "reset") {
-		log.Logvf(log.Always, "Got a connection reset, trying to recover by letting another socket do the work")
+	if stopOnError || db.IsConnectionError(err) {
 		return err
 	}
 	return nil
