@@ -285,6 +285,7 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 	}
 
 	docChan := make(chan bson.Raw, insertBufferFactor)
+	backupDocChan := make(chan bson.Raw, insertBufferFactor)
 	resultChan := make(chan error, maxInsertWorkers)
 
 	// stream documents for this collection on docChan
@@ -335,6 +336,7 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 
 				err := filterIngestError(restore.OutputOptions.StopOnError, inserter.Insert(rawDoc, hm, workerId))
 				if err != nil {
+					backupDocChan <- rawDoc
 					return
 				}
 
@@ -348,6 +350,29 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 
 	manager.Start(maxInsertWorkers, restore.ToolOptions.General.AutoScaleWorkers)
 	manager.AwaitAllWorkers()
+	close(backupDocChan)
+	if len(backupDocChan) != 0 {
+		log.Logvf(log.Always, "Trying to insert backup documents")
+		s := session.Copy()
+		defer s.Close()
+		coll := collection.With(s)
+		inserter := cosmosdb.NewCosmosDbInserter(coll)
+		for doc := range backupDocChan {
+
+			if restore.objCheck {
+				err := bson.Unmarshal(doc.Data, &bson.D{})
+				if err != nil {
+					resultChan <- fmt.Errorf("backup: invalid object: %v", err)
+					break
+				}
+			}
+
+			err := filterIngestError(restore.OutputOptions.StopOnError, inserter.Insert(doc, manager, 1))
+			if err != nil {
+				break
+			}
+		}
+	}
 
 	// final error check
 	if err = bsonSource.Err(); err != nil {
@@ -364,6 +389,10 @@ func filterIngestError(stopOnError bool, err error) error {
 		return fmt.Errorf(db.ErrLostConnection)
 	}
 	if stopOnError || db.IsConnectionError(err) {
+		return err
+	}
+	if strings.Contains(err.Error(), "reset") {
+		log.Logvf(log.Always, "Got a connection reset, trying to recover by letting another socket do the work")
 		return err
 	}
 	return nil
