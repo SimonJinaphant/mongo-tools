@@ -404,5 +404,6 @@ func filterIngestError(stopOnError bool, err error) error {
 	if stopOnError || db.IsConnectionError(err) {
 		return err
 	}
-	return nil
+	log.Logvf(log.Always, "Unknown err case: %v", err)
+	return err
 }

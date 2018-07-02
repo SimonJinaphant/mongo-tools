@@ -3189,9 +3189,17 @@ func (c *Collection) GetLastRequestStatistics() (charge int64, err error) {
 	cmd = append(cmd, bson.DocElem{"getLastRequestStatistics", "1"})
 
 	err = c.Database.Run(cmd, &result)
-	m := result.Map()
-	charge = int64(math.Ceil(m["RequestCharge"].(float64)))
+	if err != nil {
+		return 0, err
+	}
 
+	m := result.Map()
+	mcharge := m["RequestCharge"]
+	if mcharge == nil {
+		return 0, fmt.Errorf("Unable to extract map %v with item $v", m, mcharge)
+	}
+
+	charge = int64(math.Ceil(mcharge.(float64)))
 	return charge, err
 }
 
