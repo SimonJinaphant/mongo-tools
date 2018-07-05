@@ -321,18 +321,16 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 		coll := collection.With(s)
 		inserter := cosmosdb.NewCosmosDbInserter(coll)
 
-		for {
+		for rawDoc := range docChan {
 			select {
-			case rawDoc, alive := <-docChan:
-				if !alive {
-					log.Logvf(log.DebugLow, "Worker %d no more documents to ingest", workerId)
-					return
-				}
+			case <-restore.termChan:
+				log.Logvf(log.Always, "Worker %d recieved termination signal, stopping now", workerId)
+				return
 
+			default:
 				if restore.objCheck {
-					err := bson.Unmarshal(rawDoc.Data, &bson.D{})
-					if err != nil {
-						resultChan <- fmt.Errorf("invalid object: %v", err)
+					if err := bson.Unmarshal(rawDoc.Data, &bson.D{}); err != nil {
+						log.Logvf(log.Always, "invalid object: %v", err)
 						return
 					}
 				}
@@ -342,10 +340,6 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 					backupDocChan <- rawDoc
 					return
 				}
-
-			case <-restore.termChan:
-				log.Logvf(log.Always, "Worker %d recieved termination signal, stopping now", workerId)
-				return
 			}
 			watchProgressor.Set(file.Pos())
 		}
