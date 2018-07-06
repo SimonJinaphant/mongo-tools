@@ -94,7 +94,7 @@ func (h *HiringManager) Start(n int, autoScaleWorkers bool) {
 
 			amount := int(math.Ceil((float64(h.throughput) * float64(averageLatency) / 1000000.0) / float64(averageCharge)))
 			amountToHire := (amount - h.workerCount) / 2
-			log.Logvf(log.Info, "Target workers %d | Hiring %d", amount, amountToHire)
+			log.Logvf(log.Info, "Manager wants a total of workers %d; thus an additional %d workers will be hired", amount, amountToHire)
 			if amountToHire <= 0 || amountToHire > 100 || h.WasRecentlyRateLimited() {
 				break
 			}
@@ -102,18 +102,18 @@ func (h *HiringManager) Start(n int, autoScaleWorkers bool) {
 			for i := 0; i < amountToHire; i++ {
 				h.HireNewWorker()
 			}
-			log.Logvf(log.Info, "Manager thinks we can move faster; there are now %d workers", h.workerCount)
+			log.Logvf(log.Info, "There are now a total of %d workers", h.workerCount)
 			sleepTime = sleepTime + (3 * time.Second)
 		}
 
-		log.Logv(log.Info, "Hiring manager has stopped mass hiring; switching to single hire")
+		log.Logv(log.Info, "Hiring manager has stopped mass hiring; switching to single hires")
 
 		for {
 			// The Hiring manager is vulnerable to sudden changes, need further work on this.
-			time.Sleep(5 * time.Second)
+			time.Sleep(10 * time.Second)
 
 			if h.WasRecentlyRateLimited() {
-				time.Sleep(10 * time.Second)
+				time.Sleep(30 * time.Second)
 				continue
 			}
 

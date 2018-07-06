@@ -111,8 +111,10 @@ func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
 				if err != nil {
 					return err // no context needed
 				}
-				log.Logv(log.Always, "Collection dropped!, let's wait 5 seconds to avoid caching issues")
-				time.Sleep(5 * time.Second)
+				if strings.Contains(restore.ToolOptions.Host, ".documents.azure.com") {
+					log.Logv(log.Always, "The Cosmos DB collection was dropped!, let's give Cosmos DB 5 seconds to clear out its cache")
+					time.Sleep(5 * time.Second)
+				}
 				collectionExists = false
 			}
 		} else {
@@ -348,13 +350,17 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 
 	manager.Start(maxInsertWorkers, restore.ToolOptions.General.AutoScaleWorkers)
 	manager.AwaitAllWorkers()
+
 	close(backupDocChan)
 	if len(backupDocChan) != 0 {
-		log.Logvf(log.Always, "%d documents failed to be inserted before, let's try again now", len(backupDocChan))
+		log.Logvf(log.Always, "%d document(s) previously failed to be restored.", len(backupDocChan))
+		log.Logv(log.Always, "Sometimes a document could have successfully been inserted and then something else failed; you may see duplicate key errors as they are being restored again")
+
 		s := session.Copy()
 		defer s.Close()
 		coll := collection.With(s)
 		inserter := cosmosdb.NewCosmosDbInserter(coll)
+
 		for doc := range backupDocChan {
 			if restore.objCheck {
 				err := bson.Unmarshal(doc.Data, &bson.D{})
@@ -378,7 +384,7 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 	countOpDeadline := time.Now().Add(5 * time.Second)
 	for {
 		if time.Now().After(countOpDeadline) {
-			log.Logv(log.Always, "Time limit for counting has exceeded")
+			log.Logv(log.Always, "Time limit for counting has exceeded; some documents may have been lost during the restore")
 			os.Exit(123)
 		}
 
@@ -389,9 +395,8 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 		}
 
 		if int64(docCount) != documentCount {
-			log.Logvf(log.Always, "Oh dear, CosmosDB only reported %v documents while we ingested %v documents, let's wait...", docCount, documentCount)
-			log.Logvf(log.Always, "docChan: %v | backupDocChan: %v", len(docChan), len(backupDocChan))
-			time.Sleep(time.Second)
+			log.Logvf(log.Always, "CosmosDB only reported %v documents while we ingested %v documents, let's try counting again...", docCount, documentCount)
+			time.Sleep(500 * time.Millisecond)
 		} else {
 			log.Logvf(log.Always, "Collection: %s has a total of %d documents in Azure Cosmos DB", collection.Name, docCount)
 			break

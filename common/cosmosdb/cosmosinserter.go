@@ -8,6 +8,11 @@ import (
 )
 
 const (
+	tooManyRequestTimeLimit = 5
+	exceededTimeLimit       = 30
+)
+
+const (
 	TooManyRequests   = 16500
 	ExceededTimeLimit = 50
 	MalformedRequest  = 9
@@ -26,8 +31,8 @@ func NewCosmosDbInserter(collection *mgo.Collection) *CosmosDbInserter {
 func (ci *CosmosDbInserter) Insert(doc interface{}, manager *HiringManager, workerId int) error {
 	// Prevent the retry from re-creating the insertOp object again by explicitly storing it
 	insertOperation := mgo.CreateInsertOp(ci.collection.FullName, doc)
-	TooManyRequestsDeadline := time.Now().Add(5 * time.Second)
-	ExceededTimeLimitDeadline := time.Now().Add(30 * time.Second)
+	TooManyRequestsDeadline := time.Now().Add(tooManyRequestTimeLimit * time.Second)
+	ExceededTimeLimitDeadline := time.Now().Add(exceededTimeLimit * time.Second)
 
 retry:
 	latency, err := ci.collection.InsertWithOp(insertOperation)
@@ -39,7 +44,7 @@ retry:
 				time.Sleep(10 * time.Second)
 
 				if time.Now().After(ExceededTimeLimitDeadline) {
-					log.Logv(log.Always, "Maximum exceeded time limit retry exceeded 5 seconds; moving on")
+					log.Logvf(log.Always, "Maximum retries for `Exceeded Time Limit` exceeded %d seconds; moving on", exceededTimeLimit)
 				} else {
 					goto retry
 				}
@@ -49,7 +54,7 @@ retry:
 				time.Sleep(5 * time.Millisecond)
 
 				if time.Now().After(TooManyRequestsDeadline) {
-					log.Logv(log.Always, "Maximum throughput retry exceeded 5 seconds; moving on")
+					log.Logvf(log.Always, "Maximum retries for `Throughput` exceeded %d seconds; moving on", tooManyRequestTimeLimit)
 				} else {
 					goto retry
 				}
@@ -58,16 +63,16 @@ retry:
 				log.Logv(log.Always, "The request sent was malformed")
 
 			default:
-				log.Logvf(log.Always, "Unknown QueryError code: %d - %s", qerr.Code, err)
+				log.Logvf(log.Always, "An unknown QuerryError occured: %d - %s", qerr.Code, err)
 			}
 		} else {
-			log.Logvf(log.Always, "Received something that is not a QueryError: %v", err)
+			log.Logvf(log.Always, "An error occured: %v", err)
 		}
 	} else {
 		if manager.CanNotify(workerId) {
 			insertCharge, err := ci.collection.GetLastRequestStatistics()
 			if err != nil {
-				log.Logv(log.Always, "Unable to get RU cost from last op")
+				log.Logv(log.Info, "Unable to get RU cost from last operation")
 			}
 			manager.Notify(workerId, latency, insertCharge)
 		}
