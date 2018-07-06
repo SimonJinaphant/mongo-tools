@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"os"
 	"strings"
 	"time"
 
@@ -370,14 +371,28 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 			}
 		}
 	}
+
+	log.Logvf(log.Always, "Restore completed, taking a 5 second break")
+	time.Sleep(5 * time.Second)
+	log.Logvf(log.Always, "Getting the results...")
+
 	s := session.Copy()
 	defer s.Close()
 	coll := collection.With(s)
 	docCount, countErr := coll.Count()
+
 	if countErr != nil {
 		return 0, err
 	}
-	log.Logvf(log.Always, "Collection: %s has a total of %d documents in Azure Cosmos DB", collection.Name, docCount) // final error check
+
+	if int64(docCount) != documentCount {
+		log.Logvf(log.Always, "Oh dear, CosmosDB only reported %v documents while we ingested %v documents", docCount, documentCount)
+		log.Logvf(log.Always, "docChan: %v | backupDocChan: %v", len(docChan), len(backupDocChan))
+		os.Exit(123)
+	} else {
+		log.Logvf(log.Always, "Collection: %s has a total of %d documents in Azure Cosmos DB", collection.Name, docCount) // final error check
+	}
+
 	if err = bsonSource.Err(); err != nil {
 		return int64(0), fmt.Errorf("reading bson input: %v", err)
 	}

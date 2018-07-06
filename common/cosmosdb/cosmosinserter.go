@@ -36,6 +36,7 @@ retry:
 			switch qerr.Code {
 			case Error_PartitionKey:
 				time.Sleep(50 * time.Millisecond)
+				log.Logv(log.Always, "Partition key recovery...")
 				fallthrough
 
 			case Error_RequestRateTooLarge:
@@ -59,7 +60,10 @@ retry:
 		}
 	} else {
 		if manager.CanNotify(workerId) {
-			insertCharge, _ := ci.collection.GetLastRequestStatistics()
+			insertCharge, err := ci.collection.GetLastRequestStatistics()
+			if err != nil {
+				log.Logv(log.Always, "Unable to get RU cost from last op")
+			}
 			manager.Notify(workerId, latency, insertCharge)
 		}
 	}
