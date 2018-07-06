@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/globalsign/mgo/bson"
 	"github.com/mongodb/mongo-tools/common/cosmosdb"
@@ -109,6 +111,8 @@ func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
 				if err != nil {
 					return err // no context needed
 				}
+				log.Logv(log.Always, "Collection dropped!, let's wait 5 seconds to avoid caching issues")
+				time.Sleep(5 * time.Second)
 				collectionExists = false
 			}
 		} else {
@@ -285,6 +289,7 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 	}
 
 	docChan := make(chan bson.Raw, insertBufferFactor)
+	backupDocChan := make(chan bson.Raw, insertBufferFactor)
 	resultChan := make(chan error, maxInsertWorkers)
 
 	// stream documents for this collection on docChan
@@ -317,30 +322,25 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 		coll := collection.With(s)
 		inserter := cosmosdb.NewCosmosDbInserter(coll)
 
-		for {
+		for rawDoc := range docChan {
 			select {
-			case rawDoc, alive := <-docChan:
-				if !alive {
-					log.Logvf(log.DebugLow, "Worker %d no more documents to ingest", workerId)
-					return
-				}
+			case <-restore.termChan:
+				log.Logvf(log.Always, "Worker %d recieved termination signal, stopping now", workerId)
+				return
 
+			default:
 				if restore.objCheck {
-					err := bson.Unmarshal(rawDoc.Data, &bson.D{})
-					if err != nil {
-						resultChan <- fmt.Errorf("invalid object: %v", err)
+					if err := bson.Unmarshal(rawDoc.Data, &bson.D{}); err != nil {
+						log.Logvf(log.Always, "invalid object: %v", err)
 						return
 					}
 				}
 
 				err := filterIngestError(restore.OutputOptions.StopOnError, inserter.Insert(rawDoc, hm, workerId))
 				if err != nil {
+					backupDocChan <- rawDoc
 					return
 				}
-
-			case <-restore.termChan:
-				log.Logvf(log.Always, "Worker %d recieved termination signal, stopping now", workerId)
-				return
 			}
 			watchProgressor.Set(file.Pos())
 		}
@@ -348,8 +348,56 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 
 	manager.Start(maxInsertWorkers, restore.ToolOptions.General.AutoScaleWorkers)
 	manager.AwaitAllWorkers()
+	close(backupDocChan)
+	if len(backupDocChan) != 0 {
+		log.Logvf(log.Always, "%d documents failed to be inserted before, let's try again now", len(backupDocChan))
+		s := session.Copy()
+		defer s.Close()
+		coll := collection.With(s)
+		inserter := cosmosdb.NewCosmosDbInserter(coll)
+		for doc := range backupDocChan {
+			if restore.objCheck {
+				err := bson.Unmarshal(doc.Data, &bson.D{})
+				if err != nil {
+					resultChan <- fmt.Errorf("backup: invalid object: %v", err)
+					break
+				}
+			}
 
-	// final error check
+			err := filterIngestError(restore.OutputOptions.StopOnError, inserter.Insert(doc, manager, 1))
+			if err != nil {
+				continue
+			}
+		}
+	}
+
+	s := session.Copy()
+	defer s.Close()
+	coll := collection.With(s)
+
+	countOpDeadline := time.Now().Add(5 * time.Second)
+	for {
+		if time.Now().After(countOpDeadline) {
+			log.Logv(log.Always, "Time limit for counting has exceeded")
+			os.Exit(123)
+		}
+
+		docCount, countErr := coll.Count()
+
+		if countErr != nil {
+			return 0, err
+		}
+
+		if int64(docCount) != documentCount {
+			log.Logvf(log.Always, "Oh dear, CosmosDB only reported %v documents while we ingested %v documents, let's wait...", docCount, documentCount)
+			log.Logvf(log.Always, "docChan: %v | backupDocChan: %v", len(docChan), len(backupDocChan))
+			time.Sleep(time.Second)
+		} else {
+			log.Logvf(log.Always, "Collection: %s has a total of %d documents in Azure Cosmos DB", collection.Name, docCount)
+			break
+		}
+	}
+
 	if err = bsonSource.Err(); err != nil {
 		return int64(0), fmt.Errorf("reading bson input: %v", err)
 	}
@@ -366,5 +414,5 @@ func filterIngestError(stopOnError bool, err error) error {
 	if stopOnError || db.IsConnectionError(err) {
 		return err
 	}
-	return nil
+	return err
 }

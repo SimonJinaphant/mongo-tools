@@ -2854,15 +2854,16 @@ func (c *Collection) Insert(docs ...interface{}) error {
 	return err
 }
 
-// Insert with the insert op directly (For performance)
+// InsertWithOp is exposed for performance, allowing an insertion operation to be re-tried without
+// having to recreate the operation object again.
 func (c *Collection) InsertWithOp(op *InsertOperation) (latency int64, err error) {
 	startTime := time.Now()
-	_, err = c.writeOp(op.Op, true)
-	endTime := time.Now()
-	latency = endTime.Sub(startTime).Nanoseconds() / 1000
-	if err != nil {
+
+	if _, err = c.writeOp(op.Op, true); err != nil {
 		return -1, err
 	}
+
+	latency = time.Now().Sub(startTime).Nanoseconds() / 1000
 	return latency, err
 }
 
@@ -3188,10 +3189,17 @@ func (c *Collection) GetLastRequestStatistics() (charge int64, err error) {
 	cmd := make(bson.D, 0, 4)
 	cmd = append(cmd, bson.DocElem{"getLastRequestStatistics", "1"})
 
-	err = c.Database.Run(cmd, &result)
-	m := result.Map()
-	charge = int64(math.Ceil(m["RequestCharge"].(float64)))
+	if err = c.Database.Run(cmd, &result); err != nil {
+		return 0, err
+	}
 
+	m := result.Map()
+	mcharge := m["RequestCharge"]
+	if mcharge == nil {
+		return 0, fmt.Errorf("Unable to extract map %v with item $v", m, mcharge)
+	}
+
+	charge = int64(math.Ceil(mcharge.(float64)))
 	return charge, err
 }
 
