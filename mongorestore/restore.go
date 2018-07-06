@@ -350,13 +350,12 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 	manager.AwaitAllWorkers()
 	close(backupDocChan)
 	if len(backupDocChan) != 0 {
-		log.Logvf(log.Always, "Trying to insert %d backup documents", len(backupDocChan))
+		log.Logvf(log.Always, "%d documents failed to be inserted before, let's try again now", len(backupDocChan))
 		s := session.Copy()
 		defer s.Close()
 		coll := collection.With(s)
 		inserter := cosmosdb.NewCosmosDbInserter(coll)
 		for doc := range backupDocChan {
-
 			if restore.objCheck {
 				err := bson.Unmarshal(doc.Data, &bson.D{})
 				if err != nil {
@@ -372,25 +371,31 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 		}
 	}
 
-	log.Logvf(log.Always, "Restore completed, taking a 5 second break")
-	time.Sleep(5 * time.Second)
-	log.Logvf(log.Always, "Getting the results...")
-
 	s := session.Copy()
 	defer s.Close()
 	coll := collection.With(s)
-	docCount, countErr := coll.Count()
 
-	if countErr != nil {
-		return 0, err
-	}
+	countOpDeadline := time.Now().Add(5 * time.Second)
+	for {
+		if time.Now().After(countOpDeadline) {
+			log.Logv(log.Always, "Time limit for counting has exceeded")
+			os.Exit(123)
+		}
 
-	if int64(docCount) != documentCount {
-		log.Logvf(log.Always, "Oh dear, CosmosDB only reported %v documents while we ingested %v documents", docCount, documentCount)
-		log.Logvf(log.Always, "docChan: %v | backupDocChan: %v", len(docChan), len(backupDocChan))
-		os.Exit(123)
-	} else {
-		log.Logvf(log.Always, "Collection: %s has a total of %d documents in Azure Cosmos DB", collection.Name, docCount) // final error check
+		docCount, countErr := coll.Count()
+
+		if countErr != nil {
+			return 0, err
+		}
+
+		if int64(docCount) != documentCount {
+			log.Logvf(log.Always, "Oh dear, CosmosDB only reported %v documents while we ingested %v documents, let's wait...", docCount, documentCount)
+			log.Logvf(log.Always, "docChan: %v | backupDocChan: %v", len(docChan), len(backupDocChan))
+			time.Sleep(time.Second)
+		} else {
+			log.Logvf(log.Always, "Collection: %s has a total of %d documents in Azure Cosmos DB", collection.Name, docCount)
+			break
+		}
 	}
 
 	if err = bsonSource.Err(); err != nil {
@@ -406,13 +411,8 @@ func filterIngestError(stopOnError bool, err error) error {
 	if err.Error() == io.EOF.Error() {
 		return fmt.Errorf(db.ErrLostConnection)
 	}
-	if strings.Contains(err.Error(), "closed") {
-		log.Logvf(log.Always, "Got a connection closed, trying to recover by letting another socket do the work")
-		return err
-	}
 	if stopOnError || db.IsConnectionError(err) {
 		return err
 	}
-	log.Logvf(log.Always, "Unknown err case: %v", err)
 	return err
 }
