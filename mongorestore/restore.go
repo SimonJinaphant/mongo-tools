@@ -378,7 +378,9 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 	s := session.Copy()
 	defer s.Close()
 	coll := collection.With(s)
-	cosmosdb.VerifyDocumentCount(coll, uint64(documentCount))
+	if err = cosmosdb.VerifyDocumentCount(coll, uint64(documentCount)); err != nil {
+		return int64(0), err
+	}
 
 	if err = bsonSource.Err(); err != nil {
 		return int64(0), fmt.Errorf("reading bson input: %v", err)

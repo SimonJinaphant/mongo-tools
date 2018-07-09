@@ -1,7 +1,7 @@
 package cosmosdb
 
 import (
-	"os"
+	"fmt"
 	"time"
 
 	"github.com/globalsign/mgo"
@@ -36,18 +36,17 @@ func CreateCustomCosmosDB(info CosmosDBCollectionInfo, c *mgo.Collection) error 
 // VerifyDocumentCount periodically sends a count operation until either the resulting count matches
 // the expected count or the timeout occurs; this is essential for sharded Cosmos DB collection as there
 // is a small chance the master does not have the latest count.
-func VerifyDocumentCount(collection *mgo.Collection, expectedCount uint64) bool {
+func VerifyDocumentCount(collection *mgo.Collection, expectedCount uint64) error {
 	countOpDeadline := time.Now().Add(5 * time.Second)
 	for {
 		if time.Now().After(countOpDeadline) {
-			log.Logv(log.Always, "Time limit for counting has exceeded; some documents may have been lost during the restore")
-			os.Exit(123)
+			return fmt.Errorf("Time limit for counting has exceeded; some documents may have been lost during the restore")
 		}
 
 		currentCount, countErr := collection.Count()
 
 		if countErr != nil {
-			return false
+			return countErr
 		}
 
 		if uint64(currentCount) != expectedCount {
@@ -55,7 +54,7 @@ func VerifyDocumentCount(collection *mgo.Collection, expectedCount uint64) bool 
 			time.Sleep(500 * time.Millisecond)
 		} else {
 			log.Logvf(log.Always, "%s has a total of %d documents in Azure Cosmos DB", collection.Name, currentCount)
-			return true
+			return nil
 		}
 	}
 }

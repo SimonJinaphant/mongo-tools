@@ -475,7 +475,7 @@ func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
 			}
 		}
 	}
-	imp.CountDocumentsInCosmosDb()
+	retErr = imp.CountDocumentsInCosmosDb()
 	return
 }
 
