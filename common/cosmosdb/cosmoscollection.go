@@ -40,7 +40,8 @@ func VerifyDocumentCount(collection *mgo.Collection, expectedCount uint64) error
 	countOpDeadline := time.Now().Add(5 * time.Second)
 	for {
 		if time.Now().After(countOpDeadline) {
-			return fmt.Errorf("Time limit for counting has exceeded; some documents may have been lost during the restore")
+			log.Logv(log.Always, "Time limit for counting has exceeded; some documents may have been lost during the ingestion into Cosmos DB")
+			return fmt.Errorf("Time limit exceeded")
 		}
 
 		currentCount, countErr := collection.Count()
