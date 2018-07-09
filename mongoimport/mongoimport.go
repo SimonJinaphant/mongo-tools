@@ -440,7 +440,7 @@ func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
 		}
 	})
 
-	manager.Start(numInsertionWorkers, imp.ToolOptions.General.AutoScaleWorkers)
+	manager.Start(numInsertionWorkers, imp.ToolOptions.General.DisableWorkerScaling)
 	manager.AwaitAllWorkers()
 	close(backupDocChan)
 	if len(backupDocChan) != 0 {

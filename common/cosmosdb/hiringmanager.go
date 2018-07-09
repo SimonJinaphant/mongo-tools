@@ -61,12 +61,12 @@ func (h *HiringManager) Notify(workerId int, latency int64, charge int64) {
 }
 
 // Start launches the manager routine which periodically checks whether it can add new workers to speed up the ingestion task
-func (h *HiringManager) Start(n int, autoScaleWorkers bool) {
+func (h *HiringManager) Start(n int, disableWorkerScaling bool) {
 	for i := 0; i < n; i++ {
 		h.HireNewWorker()
 	}
-	if !autoScaleWorkers {
-		log.Logv(log.Info, "Auto Scaling of Insertion Workers is not enable in this run")
+	if disableWorkerScaling {
+		log.Logv(log.Always, "Auto Scaling of Insertion Workers is disabled in this run")
 		return
 	}
 	go func() {

@@ -346,7 +346,7 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 		}
 	})
 
-	manager.Start(maxInsertWorkers, restore.ToolOptions.General.AutoScaleWorkers)
+	manager.Start(maxInsertWorkers, restore.ToolOptions.General.DisableWorkerScaling)
 	manager.AwaitAllWorkers()
 
 	close(backupDocChan)
