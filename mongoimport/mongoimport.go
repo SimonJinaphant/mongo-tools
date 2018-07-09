@@ -430,10 +430,11 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
 	numInsertionWorkers := imp.IngestOptions.NumInsertionWorkers
 	log.Logvf(log.Info, "Assigning %d insertion workers", numInsertionWorkers)
+	backupDocChan := make(chan bson.D, workerBufferSize)
 
 	manager := cosmosdb.NewHiringManager(numInsertionWorkers, imp.ToolOptions.General.Throughput)
 	manager.Action = cosmosdb.AddWorkerAction(func(hm *cosmosdb.HiringManager, workerId int) {
-		err := imp.runInsertionWorker(readDocs, hm, workerId)
+		err := imp.runInsertionWorker(readDocs, backupDocChan, hm, workerId)
 		if err != nil {
 			imp.Kill(err)
 		}
@@ -441,6 +442,40 @@ func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
 
 	manager.Start(numInsertionWorkers, imp.ToolOptions.General.AutoScaleWorkers)
 	manager.AwaitAllWorkers()
+	close(backupDocChan)
+	if len(backupDocChan) != 0 {
+		log.Logvf(log.Always, "%d document(s) previously failed to be restored.", len(backupDocChan))
+		log.Logv(log.Always, "Sometimes a document could have successfully been inserted and then something else failed; you may see duplicate key errors as they are being restored again")
+		session, err := imp.SessionProvider.GetSession()
+		if err != nil {
+			return fmt.Errorf("error connecting to mongod: %v", err)
+		}
+		defer session.Close()
+		if err = imp.configureSession(session); err != nil {
+			return fmt.Errorf("error configuring session: %v", err)
+		}
+		collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
+		inserter := cosmosdb.NewCosmosDbInserter(collection)
+
+	backupLoop:
+		for {
+			select {
+			case document, alive := <-backupDocChan:
+				if !alive {
+					break backupLoop
+				}
+				err = filterIngestError(imp.IngestOptions.StopOnError, inserter.Insert(document, manager, 1))
+				if err != nil {
+					return err
+				}
+				atomic.AddUint64(&imp.insertionCount, 1)
+
+			case <-imp.Dying():
+				return nil
+			}
+		}
+	}
+	imp.CountDocumentsInCosmosDb()
 	return
 }
 
@@ -472,7 +507,7 @@ type flushInserter interface {
 
 // runInsertionWorker is a helper to InsertDocuments - it reads document off
 // the read channel and prepares then in batches for insertion into the databas
-func (imp *MongoImport) runInsertionWorker(readDocs chan bson.D, manager *cosmosdb.HiringManager, workerId int) (err error) {
+func (imp *MongoImport) runInsertionWorker(readDocs chan bson.D, backupDocChan chan bson.D, manager *cosmosdb.HiringManager, workerId int) (err error) {
 	session, err := imp.SessionProvider.GetSession()
 	if err != nil {
 		return fmt.Errorf("error connecting to mongod: %v", err)
@@ -493,6 +528,7 @@ readLoop:
 			}
 			err = filterIngestError(imp.IngestOptions.StopOnError, inserter.Insert(document, manager, workerId))
 			if err != nil {
+				backupDocChan <- document
 				return err
 			}
 			atomic.AddUint64(&imp.insertionCount, 1)
@@ -620,11 +656,7 @@ func (imp *MongoImport) CountDocumentsInCosmosDb() error {
 	defer session.Close()
 
 	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
-	docCount, countErr := collection.Count()
-	if countErr != nil {
-		return err
-	}
-	log.Logvf(log.Always, "Collection: %s has a total of %d documents in Azure Cosmos DB", collection.Name, docCount)
+	cosmosdb.VerifyDocumentCount(collection, imp.insertionCount)
 
 	return nil
 }

@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"os"
 	"strings"
 	"time"
 
@@ -315,7 +314,6 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 	}()
 
 	log.Logvf(log.Info, "using %v insertion workers", maxInsertWorkers)
-
 	manager := cosmosdb.NewHiringManager(maxInsertWorkers, restore.ToolOptions.General.Throughput)
 	manager.Action = cosmosdb.AddWorkerAction(func(hm *cosmosdb.HiringManager, workerId int) {
 
@@ -380,28 +378,7 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 	s := session.Copy()
 	defer s.Close()
 	coll := collection.With(s)
-
-	countOpDeadline := time.Now().Add(5 * time.Second)
-	for {
-		if time.Now().After(countOpDeadline) {
-			log.Logv(log.Always, "Time limit for counting has exceeded; some documents may have been lost during the restore")
-			os.Exit(123)
-		}
-
-		docCount, countErr := coll.Count()
-
-		if countErr != nil {
-			return 0, err
-		}
-
-		if int64(docCount) != documentCount {
-			log.Logvf(log.Always, "CosmosDB only reported %v documents while we ingested %v documents, let's try counting again...", docCount, documentCount)
-			time.Sleep(500 * time.Millisecond)
-		} else {
-			log.Logvf(log.Always, "Collection: %s has a total of %d documents in Azure Cosmos DB", collection.Name, docCount)
-			break
-		}
-	}
+	cosmosdb.VerifyDocumentCount(coll, uint64(documentCount))
 
 	if err = bsonSource.Err(); err != nil {
 		return int64(0), fmt.Errorf("reading bson input: %v", err)

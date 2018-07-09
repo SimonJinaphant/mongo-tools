@@ -54,13 +54,6 @@ func main() {
 
 	// verify uri options and log them
 	opts.URI.LogUnsupportedOptions()
-	for i := 0; i < opts.ImportCycle; i++ {
-		log.Logvf(log.Info, "Import cycle: %d", i)
-		importCycle(opts, inputOpts, ingestOpts, args)
-	}
-}
-
-func importCycle(opts *options.ToolOptions, inputOpts *mongoimport.InputOptions, ingestOpts *mongoimport.IngestOptions, args []string) {
 	defer cosmosdb.BenchmarkTime(time.Now(), "Import")
 	// create a session provider to connect to the db
 	sessionProvider, err := db.NewSessionProvider(*opts)
@@ -98,9 +91,4 @@ func importCycle(opts *options.ToolOptions, inputOpts *mongoimport.InputOptions,
 	if err != nil {
 		os.Exit(util.ExitError)
 	}
-
-	if err := m.CountDocumentsInCosmosDb(); err != nil {
-		log.Logvf(log.Always, "Unable to count the documents in the imported collection: %v", err)
-	}
-
 }
