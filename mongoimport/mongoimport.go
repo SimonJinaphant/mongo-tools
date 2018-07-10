@@ -461,26 +461,13 @@ func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
 		collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
 		inserter := cosmosdb.NewCosmosDbInserter(collection)
 
-	backupLoop:
-		for {
-			select {
-			case document, alive := <-backupDocChan:
-				if !alive {
-					break backupLoop
+		for doc := range backupDocChan {
+			atomic.AddUint64(&imp.insertionCount, 1)
+			if err := inserter.Insert(doc, manager, 1); err != nil {
+				if err = cosmosdb.FilterUnrecoverableErrors(imp.IngestOptions.StopOnError, err); err != nil {
+					return err
 				}
-				if err = inserter.Insert(document, manager, 1); err != nil {
-					if err.Error() == io.EOF.Error() {
-						return fmt.Errorf(db.ErrLostConnection)
-					}
-					if imp.IngestOptions.StopOnError || db.IsConnectionError(err) {
-						return err
-					}
-					continue
-				}
-				atomic.AddUint64(&imp.insertionCount, 1)
-
-			case <-imp.Dying():
-				return nil
+				continue
 			}
 		}
 	}
@@ -530,16 +517,12 @@ func (imp *MongoImport) runInsertionWorker(readDocs chan bson.D, backupDocChan c
 
 	for {
 		select {
-		case <-imp.Dying():
-			return nil
-
 		case backupDoc := <-backupDocChan:
 			log.Logvf(log.Info, "Worker %d picked up a document from the backup channel", workerId)
 			if err := inserter.Insert(backupDoc, manager, workerId); err != nil {
 				if err = cosmosdb.FilterUnrecoverableErrors(imp.IngestOptions.StopOnError, err); err != nil {
 					return err
 				}
-				continue
 			}
 
 		default:
@@ -558,6 +541,7 @@ func (imp *MongoImport) runInsertionWorker(readDocs chan bson.D, backupDocChan c
 
 				log.Logvf(log.Info, "Worker %d is able to recover from the error and go back in action", workerId)
 				time.Sleep(100 * time.Millisecond)
+				continue
 			}
 		}
 		atomic.AddUint64(&imp.insertionCount, 1)
