@@ -8,6 +8,8 @@
 package mongoimport
 
 import (
+	"time"
+
 	"github.com/globalsign/mgo"
 	"github.com/globalsign/mgo/bson"
 	"github.com/mongodb/mongo-tools/common/cosmosdb"
@@ -459,26 +461,12 @@ func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
 		collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
 		inserter := cosmosdb.NewCosmosDbInserter(collection)
 
-	backupLoop:
-		for {
-			select {
-			case document, alive := <-backupDocChan:
-				if !alive {
-					break backupLoop
+		for doc := range backupDocChan {
+			atomic.AddUint64(&imp.insertionCount, 1)
+			if err := inserter.Insert(doc, manager, 1); err != nil {
+				if err = cosmosdb.FilterUnrecoverableErrors(imp.IngestOptions.StopOnError, err); err != nil {
+					return err
 				}
-				if err = inserter.Insert(document, manager, 1); err != nil {
-					if err.Error() == io.EOF.Error() {
-						return fmt.Errorf(db.ErrLostConnection)
-					}
-					if imp.IngestOptions.StopOnError || db.IsConnectionError(err) {
-						return err
-					}
-					continue
-				}
-				atomic.AddUint64(&imp.insertionCount, 1)
-
-			case <-imp.Dying():
-				return nil
 			}
 		}
 	}
@@ -526,27 +514,36 @@ func (imp *MongoImport) runInsertionWorker(readDocs chan bson.D, backupDocChan c
 	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
 	inserter := cosmosdb.NewCosmosDbInserter(collection)
 
-readLoop:
 	for {
 		select {
-		case document, alive := <-readDocs:
-			if !alive {
-				break readLoop
-			}
-			if err = inserter.Insert(document, manager, workerId); err != nil {
-				backupDocChan <- document
-				if err.Error() == io.EOF.Error() {
-					return fmt.Errorf(db.ErrLostConnection)
-				}
-				if imp.IngestOptions.StopOnError || db.IsConnectionError(err) {
+		case backupDoc := <-backupDocChan:
+			log.Logvf(log.Info, "Worker %d picked up a document from the backup channel", workerId)
+			if err := inserter.Insert(backupDoc, manager, workerId); err != nil {
+				if err = cosmosdb.FilterUnrecoverableErrors(imp.IngestOptions.StopOnError, err); err != nil {
 					return err
 				}
 			}
-			atomic.AddUint64(&imp.insertionCount, 1)
 
-		case <-imp.Dying():
-			return nil
+		default:
+			document, alive := <-readDocs
+			if !alive {
+				log.Logvf(log.Info, "Worker %d has finished ingesting documents", workerId)
+				return nil
+			}
+			if err := inserter.Insert(document, manager, workerId); err != nil {
+				log.Logvf(log.Info, "Worker %d is backing up a document due to an error: %v", workerId, err)
+				backupDocChan <- document
+
+				if err = cosmosdb.FilterUnrecoverableErrors(imp.IngestOptions.StopOnError, err); err != nil {
+					return err
+				}
+
+				log.Logvf(log.Info, "Worker %d is able to recover from the error and go back in action", workerId)
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
 		}
+		atomic.AddUint64(&imp.insertionCount, 1)
 	}
 
 	return nil

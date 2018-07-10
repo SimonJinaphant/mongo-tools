@@ -38,6 +38,7 @@ func NewHiringManager(defaultWorkers int, throughput int) *HiringManager {
 
 func (h *HiringManager) AwaitAllWorkers() {
 	h.workerWg.Wait()
+	log.Logv(log.Info, "All workers have finished")
 }
 
 func (h *HiringManager) CountWorkers() int {
@@ -137,7 +138,7 @@ func (h *HiringManager) HireNewWorker() {
 	go func() {
 		defer h.workerWg.Done()
 		if err := h.AddWorkerAction(h, newWorkerID); err != nil {
-			log.Logvf(log.Always, "Worker %d exiting due to an error: %v", err)
+			log.Logvf(log.Always, "Worker %d exiting due to an error: %v", newWorkerID, err)
 		}
 	}()
 }

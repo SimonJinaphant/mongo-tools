@@ -8,7 +8,6 @@ package mongorestore
 
 import (
 	"fmt"
-	"io"
 	"io/ioutil"
 	"strings"
 	"time"
@@ -291,7 +290,6 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 
 	docChan := make(chan bson.Raw, insertBufferFactor)
 	backupDocChan := make(chan bson.Raw, insertBufferFactor*100)
-	resultChan := make(chan error, maxInsertWorkers)
 
 	// stream documents for this collection on docChan
 	go func() {
@@ -321,26 +319,33 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 		coll := collection.With(s)
 		inserter := cosmosdb.NewCosmosDbInserter(coll)
 
-		for rawDoc := range docChan {
+		for {
 			select {
-			case <-restore.termChan:
-				return fmt.Errorf("Worker %d recieved termination signal, stopping now", workerId)
-
-			default:
-				if restore.objCheck {
-					if err := bson.Unmarshal(rawDoc.Data, &bson.D{}); err != nil {
-						return fmt.Errorf("invalid object: %v", err)
-					}
-				}
-
-				if err := inserter.Insert(rawDoc, hm, workerId); err != nil {
-					backupDocChan <- rawDoc
-					if err.Error() == io.EOF.Error() {
-						return fmt.Errorf(db.ErrLostConnection)
-					}
-					if restore.OutputOptions.StopOnError || db.IsConnectionError(err) {
+			case backupDoc := <-backupDocChan:
+				log.Logvf(log.Info, "Worker %d picked up a document from the backup channel", workerId)
+				if err := inserter.Insert(backupDoc, hm, workerId); err != nil {
+					if err = cosmosdb.FilterUnrecoverableErrors(restore.OutputOptions.StopOnError, err); err != nil {
 						return err
 					}
+				}
+			default:
+				document, alive := <-docChan
+				if !alive {
+					log.Logvf(log.Info, "Worker %d has finished ingesting documents", workerId)
+					return nil
+				}
+
+				if err := inserter.Insert(document, hm, workerId); err != nil {
+					log.Logvf(log.Info, "Worker %d is backing up a document due to an error: %v", workerId, err)
+					backupDocChan <- document
+
+					if err = cosmosdb.FilterUnrecoverableErrors(restore.OutputOptions.StopOnError, err); err != nil {
+						return err
+					}
+
+					log.Logvf(log.Info, "Worker %d is able to recover from the error and go back in action", workerId)
+					time.Sleep(100 * time.Millisecond)
+					continue
 				}
 			}
 			watchProgressor.Set(file.Pos())
@@ -362,22 +367,10 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 		inserter := cosmosdb.NewCosmosDbInserter(coll)
 
 		for doc := range backupDocChan {
-			if restore.objCheck {
-				err := bson.Unmarshal(doc.Data, &bson.D{})
-				if err != nil {
-					resultChan <- fmt.Errorf("backup: invalid object: %v", err)
-					break
-				}
-			}
-
 			if err := inserter.Insert(doc, manager, 1); err != nil {
-				if err.Error() == io.EOF.Error() {
-					return 0, fmt.Errorf(db.ErrLostConnection)
-				}
-				if restore.OutputOptions.StopOnError || db.IsConnectionError(err) {
+				if err = cosmosdb.FilterUnrecoverableErrors(restore.OutputOptions.StopOnError, err); err != nil {
 					return 0, err
 				}
-				continue
 			}
 		}
 	}
