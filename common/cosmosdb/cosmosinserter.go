@@ -65,8 +65,6 @@ retry:
 			default:
 				log.Logvf(log.Always, "An unknown QuerryError occured: %d - %s", qerr.Code, err)
 			}
-		} else {
-			log.Logvf(log.Always, "An error occured: %v", err)
 		}
 	} else {
 		if manager.CanNotify(workerId) {
