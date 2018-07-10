@@ -371,7 +371,6 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 				if err = cosmosdb.FilterUnrecoverableErrors(restore.OutputOptions.StopOnError, err); err != nil {
 					return 0, err
 				}
-				continue
 			}
 		}
 	}

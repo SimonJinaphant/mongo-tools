@@ -467,7 +467,6 @@ func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
 				if err = cosmosdb.FilterUnrecoverableErrors(imp.IngestOptions.StopOnError, err); err != nil {
 					return err
 				}
-				continue
 			}
 		}
 	}
