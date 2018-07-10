@@ -9,8 +9,6 @@ import (
 	"github.com/mongodb/mongo-tools/common/log"
 )
 
-type AddWorkerAction func(h *HiringManager, a int)
-
 type HiringManager struct {
 	latencyRecords     []int64
 	consumptionRecords []int64
@@ -21,7 +19,8 @@ type HiringManager struct {
 
 	workerWg *sync.WaitGroup
 	recordWg *sync.WaitGroup
-	Action   AddWorkerAction
+
+	AddWorkerAction func(manager *HiringManager, workerId int) error
 }
 
 func NewHiringManager(defaultWorkers int, throughput int) *HiringManager {
@@ -33,7 +32,7 @@ func NewHiringManager(defaultWorkers int, throughput int) *HiringManager {
 		throughput:         throughput,
 		workerWg:           new(sync.WaitGroup),
 		recordWg:           new(sync.WaitGroup),
-		Action:             nil,
+		AddWorkerAction:    nil,
 	}
 }
 
@@ -62,6 +61,10 @@ func (h *HiringManager) Notify(workerId int, latency int64, charge int64) {
 
 // Start launches the manager routine which periodically checks whether it can add new workers to speed up the ingestion task
 func (h *HiringManager) Start(n int, disableWorkerScaling bool) {
+	if h.AddWorkerAction == nil {
+		log.Logv(log.Always, "Unable to start manager with no AddWorkerAction defined")
+		return
+	}
 	for i := 0; i < n; i++ {
 		h.HireNewWorker()
 	}
@@ -133,7 +136,9 @@ func (h *HiringManager) HireNewWorker() {
 	h.workerWg.Add(1)
 	go func() {
 		defer h.workerWg.Done()
-		h.Action(h, newWorkerID)
+		if err := h.AddWorkerAction(h, newWorkerID); err != nil {
+			log.Logvf(log.Always, "Worker %d exiting due to an error: %v", err)
+		}
 	}()
 }
 

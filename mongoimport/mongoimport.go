@@ -430,18 +430,20 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
 	numInsertionWorkers := imp.IngestOptions.NumInsertionWorkers
 	log.Logvf(log.Info, "Assigning %d insertion workers", numInsertionWorkers)
-	backupDocChan := make(chan bson.D, workerBufferSize)
+	backupDocChan := make(chan bson.D, workerBufferSize*100)
 
 	manager := cosmosdb.NewHiringManager(numInsertionWorkers, imp.ToolOptions.General.Throughput)
-	manager.Action = cosmosdb.AddWorkerAction(func(hm *cosmosdb.HiringManager, workerId int) {
-		err := imp.runInsertionWorker(readDocs, backupDocChan, hm, workerId)
+	manager.AddWorkerAction = func(manager *cosmosdb.HiringManager, workerId int) error {
+		err := imp.runInsertionWorker(readDocs, backupDocChan, manager, workerId)
 		if err != nil {
 			imp.Kill(err)
 		}
-	})
+		return nil
+	}
 
 	manager.Start(numInsertionWorkers, imp.ToolOptions.General.DisableWorkerScaling)
 	manager.AwaitAllWorkers()
+
 	close(backupDocChan)
 	if len(backupDocChan) != 0 {
 		log.Logvf(log.Always, "%d document(s) previously failed to be restored.", len(backupDocChan))
@@ -464,8 +466,13 @@ func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
 				if !alive {
 					break backupLoop
 				}
-				err = filterIngestError(imp.IngestOptions.StopOnError, inserter.Insert(document, manager, 1))
-				if err != nil {
+				if err = inserter.Insert(document, manager, 1); err != nil {
+					if err.Error() == io.EOF.Error() {
+						return fmt.Errorf(db.ErrLostConnection)
+					}
+					if imp.IngestOptions.StopOnError || db.IsConnectionError(err) {
+						return err
+					}
 					continue
 				}
 				atomic.AddUint64(&imp.insertionCount, 1)
@@ -526,10 +533,14 @@ readLoop:
 			if !alive {
 				break readLoop
 			}
-			err = filterIngestError(imp.IngestOptions.StopOnError, inserter.Insert(document, manager, workerId))
-			if err != nil {
+			if err = inserter.Insert(document, manager, workerId); err != nil {
 				backupDocChan <- document
-				return nil
+				if err.Error() == io.EOF.Error() {
+					return fmt.Errorf(db.ErrLostConnection)
+				}
+				if imp.IngestOptions.StopOnError || db.IsConnectionError(err) {
+					return err
+				}
 			}
 			atomic.AddUint64(&imp.insertionCount, 1)
 

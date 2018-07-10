@@ -290,7 +290,7 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 	}
 
 	docChan := make(chan bson.Raw, insertBufferFactor)
-	backupDocChan := make(chan bson.Raw, insertBufferFactor)
+	backupDocChan := make(chan bson.Raw, insertBufferFactor*100)
 	resultChan := make(chan error, maxInsertWorkers)
 
 	// stream documents for this collection on docChan
@@ -315,8 +315,7 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 
 	log.Logvf(log.Info, "using %v insertion workers", maxInsertWorkers)
 	manager := cosmosdb.NewHiringManager(maxInsertWorkers, restore.ToolOptions.General.Throughput)
-	manager.Action = cosmosdb.AddWorkerAction(func(hm *cosmosdb.HiringManager, workerId int) {
-
+	manager.AddWorkerAction = func(hm *cosmosdb.HiringManager, workerId int) error {
 		s := session.Copy()
 		defer s.Close()
 		coll := collection.With(s)
@@ -325,26 +324,29 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 		for rawDoc := range docChan {
 			select {
 			case <-restore.termChan:
-				log.Logvf(log.Always, "Worker %d recieved termination signal, stopping now", workerId)
-				return
+				return fmt.Errorf("Worker %d recieved termination signal, stopping now", workerId)
 
 			default:
 				if restore.objCheck {
 					if err := bson.Unmarshal(rawDoc.Data, &bson.D{}); err != nil {
-						log.Logvf(log.Always, "invalid object: %v", err)
-						return
+						return fmt.Errorf("invalid object: %v", err)
 					}
 				}
 
-				err := filterIngestError(restore.OutputOptions.StopOnError, inserter.Insert(rawDoc, hm, workerId))
-				if err != nil {
+				if err := inserter.Insert(rawDoc, hm, workerId); err != nil {
 					backupDocChan <- rawDoc
-					return
+					if err.Error() == io.EOF.Error() {
+						return fmt.Errorf(db.ErrLostConnection)
+					}
+					if restore.OutputOptions.StopOnError || db.IsConnectionError(err) {
+						return err
+					}
 				}
 			}
 			watchProgressor.Set(file.Pos())
 		}
-	})
+		return nil
+	}
 
 	manager.Start(maxInsertWorkers, restore.ToolOptions.General.DisableWorkerScaling)
 	manager.AwaitAllWorkers()
@@ -368,8 +370,13 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 				}
 			}
 
-			err := filterIngestError(restore.OutputOptions.StopOnError, inserter.Insert(doc, manager, 1))
-			if err != nil {
+			if err := inserter.Insert(doc, manager, 1); err != nil {
+				if err.Error() == io.EOF.Error() {
+					return 0, fmt.Errorf(db.ErrLostConnection)
+				}
+				if restore.OutputOptions.StopOnError || db.IsConnectionError(err) {
+					return 0, err
+				}
 				continue
 			}
 		}
@@ -386,17 +393,4 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 		return int64(0), fmt.Errorf("reading bson input: %v", err)
 	}
 	return documentCount, termErr
-}
-
-func filterIngestError(stopOnError bool, err error) error {
-	if err == nil {
-		return nil
-	}
-	if err.Error() == io.EOF.Error() {
-		return fmt.Errorf(db.ErrLostConnection)
-	}
-	if stopOnError || db.IsConnectionError(err) {
-		return err
-	}
-	return err
 }
