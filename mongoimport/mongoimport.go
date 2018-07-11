@@ -513,9 +513,22 @@ func (imp *MongoImport) runInsertionWorker(readDocs chan bson.D, backupDocChan c
 	}
 	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
 	inserter := cosmosdb.NewCosmosDbInserter(collection)
-
+	waitTime := 0
 	for {
+		time.Sleep(time.Duration(waitTime) * time.Millisecond)
 		select {
+		case managerMsg := <-manager.ManagerChannels[workerId]:
+			switch managerMsg {
+			case cosmosdb.MsgSlowdown:
+				waitTime += 500
+				log.Logvf(log.Info, "Worker %d was told to slow down; it will now await %d ms between operations", workerId, waitTime)
+			case cosmosdb.MsgSpeedup:
+				waitTime -= 500
+				log.Logvf(log.Info, "Worker %d was told to speed back up; it will now await %d ms between operations", workerId, waitTime)
+			default:
+				log.Logvf(log.Info, "Worker %d got an unknown message from manager", workerId)
+			}
+
 		case backupDoc := <-backupDocChan:
 			log.Logvf(log.Info, "Worker %d picked up a document from the backup channel", workerId)
 			if err := inserter.Insert(backupDoc, manager, workerId); err != nil {
@@ -527,7 +540,6 @@ func (imp *MongoImport) runInsertionWorker(readDocs chan bson.D, backupDocChan c
 		default:
 			document, alive := <-readDocs
 			if !alive {
-				log.Logvf(log.Info, "Worker %d has finished ingesting documents", workerId)
 				return nil
 			}
 			if err := inserter.Insert(document, manager, workerId); err != nil {

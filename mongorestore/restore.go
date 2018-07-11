@@ -313,29 +313,42 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 
 	log.Logvf(log.Info, "using %v insertion workers", maxInsertWorkers)
 	manager := cosmosdb.NewHiringManager(maxInsertWorkers, restore.ToolOptions.General.Throughput)
-	manager.AddWorkerAction = func(hm *cosmosdb.HiringManager, workerId int) error {
+	manager.AddWorkerAction = func(manager *cosmosdb.HiringManager, workerId int) error {
 		s := session.Copy()
 		defer s.Close()
 		coll := collection.With(s)
 		inserter := cosmosdb.NewCosmosDbInserter(coll)
-
+		waitTime := 0
 		for {
+			time.Sleep(time.Duration(waitTime) * time.Millisecond)
 			select {
+			case managerMsg := <-manager.ManagerChannels[workerId]:
+				switch managerMsg {
+				case cosmosdb.MsgSlowdown:
+					waitTime += 500
+					log.Logvf(log.Info, "Worker %d was told to slow down; it will now await %d ms between operations", workerId, waitTime)
+				case cosmosdb.MsgSpeedup:
+					waitTime -= 500
+					log.Logvf(log.Info, "Worker %d was told to speed back up; it will now await %d ms between operations", workerId, waitTime)
+				default:
+					log.Logvf(log.Info, "Worker %d got an unknown message from manager", workerId)
+				}
+
 			case backupDoc := <-backupDocChan:
 				log.Logvf(log.Info, "Worker %d picked up a document from the backup channel", workerId)
-				if err := inserter.Insert(backupDoc, hm, workerId); err != nil {
+				if err := inserter.Insert(backupDoc, manager, workerId); err != nil {
 					if err = cosmosdb.FilterUnrecoverableErrors(restore.OutputOptions.StopOnError, err); err != nil {
 						return err
 					}
 				}
+
 			default:
 				document, alive := <-docChan
 				if !alive {
-					log.Logvf(log.Info, "Worker %d has finished ingesting documents", workerId)
 					return nil
 				}
 
-				if err := inserter.Insert(document, hm, workerId); err != nil {
+				if err := inserter.Insert(document, manager, workerId); err != nil {
 					log.Logvf(log.Info, "Worker %d is backing up a document due to an error: %v", workerId, err)
 					backupDocChan <- document
 

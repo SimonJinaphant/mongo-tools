@@ -9,16 +9,26 @@ import (
 	"github.com/mongodb/mongo-tools/common/log"
 )
 
+type HiringManagerMessage int
+
+const (
+	MsgSlowdown HiringManagerMessage = 1
+	MsgSpeedup  HiringManagerMessage = 2
+)
+
 type HiringManager struct {
 	latencyRecords     []int64
 	consumptionRecords []int64
 
-	rateLimitCounter int64
+	rateLimitCounter uint64
 	workerCount      int
 	throughput       int
 
 	workerWg *sync.WaitGroup
 	recordWg *sync.WaitGroup
+
+	ManagerChannels []chan HiringManagerMessage
+	slowDownCount   int
 
 	AddWorkerAction func(manager *HiringManager, workerId int) error
 }
@@ -32,6 +42,8 @@ func NewHiringManager(defaultWorkers int, throughput int) *HiringManager {
 		throughput:         throughput,
 		workerWg:           new(sync.WaitGroup),
 		recordWg:           new(sync.WaitGroup),
+		ManagerChannels:    make([]chan HiringManagerMessage, defaultWorkers),
+		slowDownCount:      0,
 		AddWorkerAction:    nil,
 	}
 }
@@ -99,7 +111,7 @@ func (h *HiringManager) Start(n int, disableWorkerScaling bool) {
 			amount := int(math.Ceil((float64(h.throughput) * float64(averageLatency) / 1000000.0) / float64(averageCharge)))
 			amountToHire := (amount - h.workerCount) / 2
 			log.Logvf(log.Info, "Manager wants a total of workers %d; thus an additional %d workers will be hired", amount, amountToHire)
-			if amountToHire <= 0 || amountToHire > 100 || h.WasRecentlyRateLimited() {
+			if amountToHire <= 0 || amountToHire > 100 || h.CurrentRateLimitCount() > 0 {
 				break
 			}
 
@@ -116,13 +128,29 @@ func (h *HiringManager) Start(n int, disableWorkerScaling bool) {
 			// The Hiring manager is vulnerable to sudden changes, need further work on this.
 			time.Sleep(10 * time.Second)
 
-			if h.WasRecentlyRateLimited() {
-				time.Sleep(30 * time.Second)
+			if rateLimitCount := h.CurrentRateLimitCount(); rateLimitCount > 0 {
+				log.Logvf(log.Info, "There was %d `Request rate too large` responses, no extra workers are needed", rateLimitCount)
+				rateLimitThreshold := uint64(h.workerCount * 5)
+
+				if rateLimitCount > rateLimitThreshold {
+					for i := uint64(0); i < rateLimitCount/rateLimitThreshold; i++ {
+						h.slowdownWorker()
+					}
+				}
+				time.Sleep(5 * time.Second)
+				atomic.StoreUint64(&h.rateLimitCounter, 0)
 				continue
 			}
 
-			h.HireNewWorker()
-			log.Logvf(log.Info, "Manager thinks we can move a bit faster; there are now %d workers", h.workerCount)
+			if h.slowDownCount > 0 {
+				h.speedupWorker()
+				log.Logv(log.Info, "Manager thinks we can move a bit faster; a worker can speed back up again")
+			} else {
+				h.HireNewWorker()
+				log.Logvf(log.Info, "Manager thinks we can move a bit faster; there are now %d workers", h.workerCount)
+			}
+			time.Sleep(10 * time.Second)
+			atomic.StoreUint64(&h.rateLimitCounter, 0)
 		}
 	}()
 }
@@ -131,7 +159,11 @@ func (h *HiringManager) Start(n int, disableWorkerScaling bool) {
 func (h *HiringManager) HireNewWorker() {
 	h.latencyRecords = append(h.latencyRecords, 0)
 	h.consumptionRecords = append(h.consumptionRecords, 0)
+
 	newWorkerID := h.workerCount
+	h.ManagerChannels = append(h.ManagerChannels, nil)
+	h.ManagerChannels[newWorkerID] = make(chan HiringManagerMessage, 10)
+
 	h.workerCount++
 
 	h.workerWg.Add(1)
@@ -145,16 +177,36 @@ func (h *HiringManager) HireNewWorker() {
 
 //NotifyRateLimit is to be invoked from worker to notify the manager to stop adding new workers
 func (h *HiringManager) NotifyRateLimit() {
-	atomic.AddInt64(&h.rateLimitCounter, 1)
+	atomic.AddUint64(&h.rateLimitCounter, 1)
 }
 
-// WasRecentlyRateLimited is invoked from the manager to check if a worker has reported a RateLimit error since the last time it checked.
-func (h *HiringManager) WasRecentlyRateLimited() bool {
-	limitCount := atomic.LoadInt64(&h.rateLimitCounter)
-	atomic.StoreInt64(&h.rateLimitCounter, 0)
-	if limitCount > 0 {
-		log.Logvf(log.Info, "There was %d `Request rate too large` responses, no extra workers are needed", limitCount)
-		return true
+// CurrentRateLimitCount is invoked from the manager to check if a worker has reported a RateLimit error since the last time it checked.
+func (h *HiringManager) CurrentRateLimitCount() uint64 {
+	limitCount := atomic.LoadUint64(&h.rateLimitCounter)
+	atomic.StoreUint64(&h.rateLimitCounter, 0)
+	return limitCount
+}
+
+func (h *HiringManager) slowdownWorker() {
+	targetWorker := h.slowDownCount
+	if targetWorker >= h.workerCount {
+		targetWorker = targetWorker % h.workerCount
 	}
-	return false
+	h.ManagerChannels[targetWorker] <- MsgSlowdown
+	h.slowDownCount++
+}
+
+func (h *HiringManager) speedupWorker() {
+	if h.slowDownCount <= 0 {
+		log.Logv(log.Info, "All workers are already running as fast as possible")
+		return
+	}
+
+	targetWorker := h.slowDownCount - 1
+	if targetWorker >= h.workerCount {
+		targetWorker = targetWorker % h.workerCount
+	}
+
+	h.ManagerChannels[targetWorker] <- MsgSpeedup
+	h.slowDownCount--
 }
