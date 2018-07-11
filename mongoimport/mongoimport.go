@@ -229,11 +229,6 @@ func (imp *MongoImport) ValidateSettings(args []string) error {
 		imp.IngestOptions.BulkBufferSize = 1000
 	}
 
-	// For testing purposes, make sure to drop the database if we're cycling
-	if imp.ToolOptions.General.ImportCycle > 1 {
-		imp.IngestOptions.Drop = true
-	}
-
 	// ensure no more than one positional argument is supplied
 	if len(args) > 1 {
 		return fmt.Errorf("only one positional argument is allowed")
@@ -313,6 +308,12 @@ func (imp *MongoImport) ImportDocuments() (uint64, error) {
 		return 0, err
 	}
 	defer source.Close()
+
+	if strings.Contains(imp.ToolOptions.Host, ".documents.azure.com") {
+		if err := cosmosdb.ValidateSizeRequirement(imp.ToolOptions.General.ShardKey, fileSize, imp.ToolOptions.General.IgnoreSizeWarning); err != nil {
+			return 0, err
+		}
+	}
 
 	inputReader, err := imp.getInputReader(source)
 	if err != nil {
