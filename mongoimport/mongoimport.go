@@ -540,7 +540,6 @@ func (imp *MongoImport) runInsertionWorker(readDocs chan bson.D, backupDocChan c
 		default:
 			document, alive := <-readDocs
 			if !alive {
-				log.Logvf(log.Info, "Worker %d has finished ingesting documents", workerId)
 				return nil
 			}
 			if err := inserter.Insert(document, manager, workerId); err != nil {
