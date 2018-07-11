@@ -9,6 +9,15 @@ import (
 	"github.com/mongodb/mongo-tools/common/log"
 )
 
+const (
+	fileSizeWarning = int64(2e9)
+	fileSizeFailure = int64(2 * fileSizeWarning)
+
+	shardkeyMessage = `
+	Re-run this tool with the parameters --shardKey <key>, where <key> is a valid Mongo DB Shard Key.
+	For more information about Shard Key visit: https://docs.mongodb.com/manual/sharding/#shard-keys.`
+)
+
 // The CosmosDBCollectionInfo type holds metadata about a CosmosDB collection.
 type CosmosDBCollectionInfo struct {
 	ShardKey   string
@@ -58,4 +67,32 @@ func VerifyDocumentCount(collection *mgo.Collection, expectedCount uint64) error
 			return nil
 		}
 	}
+}
+
+func ValidateSizeRequirement(shardKey string, fileSize int64, ignoreSizeWarning bool) error {
+	log.Logvf(log.Info, "File size is: %d", fileSize)
+	if shardKey == "" {
+		if fileSize > fileSizeFailure {
+			log.Logv(log.Always, "The file to be ingested is larger than 5GB; for performance reasons we require you specify a Shard Key when migrating into CosmosDB")
+			log.Logv(log.Always, shardkeyMessage)
+			return fmt.Errorf("File is larger than 5GB")
+		}
+
+		if ignoreSizeWarning {
+			log.Logv(log.Always, "--ignoreSizeWarning is enabled, you may ingest into Azure Cosmos DB")
+			return nil
+		}
+
+		if fileSize > fileSizeWarning {
+			log.Logv(log.Always, "The file to be ingested is larger than 2GB; for best performance on Cosmos DB we recommend you specify a shard key")
+			log.Logv(log.Always, shardkeyMessage)
+			log.Logv(log.Always, "or suppress this warning with the flag --ignoreSizeWarning")
+			return fmt.Errorf("File is larger than 2GB")
+		}
+
+		log.Logvf(log.Info, "The file to be ingested is under 2GB, which is acceptable for an Fixed (un-sharded) Cosmos DB collection")
+	} else {
+		log.Logvf(log.Info, "No need to check Cosmos DB ingestion size requirements since the Shard Key is defined")
+	}
+	return nil
 }

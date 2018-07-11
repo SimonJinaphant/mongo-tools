@@ -88,7 +88,11 @@ func (restore *MongoRestore) RestoreIntents() error {
 
 // RestoreIntent attempts to restore a given intent into MongoDB.
 func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
-
+	if strings.Contains(restore.ToolOptions.Host, ".documents.azure.com") {
+		if err := cosmosdb.ValidateSizeRequirement(restore.ToolOptions.General.ShardKey, intent.Size, restore.ToolOptions.General.IgnoreSizeWarning); err != nil {
+			return err
+		}
+	}
 	collectionExists, err := restore.CollectionExists(intent)
 	if err != nil {
 		return fmt.Errorf("error reading database: %v", err)
