@@ -109,7 +109,7 @@ type General struct {
 	ImportCycle int `long:"importCycle" value-name:"<number>" default:"1" hidden:"true" description:"Repeat the import cycle <num> amount of times"`
 
 	// Flag for adaptive insertion worker scaling
-	AutoScaleWorkers bool `long:"autoScaleWorkers" default:"false" description:"Enable the scale up of Insertion workers"`
+	DisableWorkerScaling bool `long:"disableWorkerScaling" default:"false" description:"Disable the scale up of Insertion workers"`
 }
 
 // Struct holding verbosity-related options

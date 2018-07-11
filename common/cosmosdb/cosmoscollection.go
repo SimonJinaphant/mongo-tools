@@ -1,8 +1,12 @@
 package cosmosdb
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/globalsign/mgo"
 	"github.com/globalsign/mgo/bson"
+	"github.com/mongodb/mongo-tools/common/log"
 )
 
 // The CosmosDBCollectionInfo type holds metadata about a CosmosDB collection.
@@ -27,4 +31,31 @@ func CreateCustomCosmosDB(info CosmosDBCollectionInfo, c *mgo.Collection) error 
 	}
 
 	return c.Database.Run(cmd, nil)
+}
+
+// VerifyDocumentCount periodically sends a count operation until either the resulting count matches
+// the expected count or the timeout occurs; this is essential for sharded Cosmos DB collection as there
+// is a small chance the master does not have the latest count.
+func VerifyDocumentCount(collection *mgo.Collection, expectedCount uint64) error {
+	countOpDeadline := time.Now().Add(5 * time.Second)
+	for {
+		if time.Now().After(countOpDeadline) {
+			log.Logv(log.Always, "Time limit for counting has exceeded; some documents may have been lost during the ingestion into Cosmos DB")
+			return fmt.Errorf("Time limit exceeded")
+		}
+
+		currentCount, countErr := collection.Count()
+
+		if countErr != nil {
+			return countErr
+		}
+
+		if uint64(currentCount) != expectedCount {
+			log.Logvf(log.Always, "CosmosDB only reported %v documents while we ingested %v documents, let's try counting again...", currentCount, expectedCount)
+			time.Sleep(500 * time.Millisecond)
+		} else {
+			log.Logvf(log.Always, "%s has a total of %d documents in Azure Cosmos DB", collection.Name, currentCount)
+			return nil
+		}
+	}
 }

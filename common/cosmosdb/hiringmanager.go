@@ -9,8 +9,6 @@ import (
 	"github.com/mongodb/mongo-tools/common/log"
 )
 
-type AddWorkerAction func(h *HiringManager, a int)
-
 type HiringManager struct {
 	latencyRecords     []int64
 	consumptionRecords []int64
@@ -21,7 +19,8 @@ type HiringManager struct {
 
 	workerWg *sync.WaitGroup
 	recordWg *sync.WaitGroup
-	Action   AddWorkerAction
+
+	AddWorkerAction func(manager *HiringManager, workerId int) error
 }
 
 func NewHiringManager(defaultWorkers int, throughput int) *HiringManager {
@@ -33,12 +32,13 @@ func NewHiringManager(defaultWorkers int, throughput int) *HiringManager {
 		throughput:         throughput,
 		workerWg:           new(sync.WaitGroup),
 		recordWg:           new(sync.WaitGroup),
-		Action:             nil,
+		AddWorkerAction:    nil,
 	}
 }
 
 func (h *HiringManager) AwaitAllWorkers() {
 	h.workerWg.Wait()
+	log.Logv(log.Info, "All workers have finished")
 }
 
 func (h *HiringManager) CountWorkers() int {
@@ -61,12 +61,16 @@ func (h *HiringManager) Notify(workerId int, latency int64, charge int64) {
 }
 
 // Start launches the manager routine which periodically checks whether it can add new workers to speed up the ingestion task
-func (h *HiringManager) Start(n int, autoScaleWorkers bool) {
+func (h *HiringManager) Start(n int, disableWorkerScaling bool) {
+	if h.AddWorkerAction == nil {
+		log.Logv(log.Always, "Unable to start manager with no AddWorkerAction defined")
+		return
+	}
 	for i := 0; i < n; i++ {
 		h.HireNewWorker()
 	}
-	if !autoScaleWorkers {
-		log.Logv(log.Info, "Auto Scaling of Insertion Workers is not enable in this run")
+	if disableWorkerScaling {
+		log.Logv(log.Always, "Auto Scaling of Insertion Workers is disabled in this run")
 		return
 	}
 	go func() {
@@ -94,7 +98,7 @@ func (h *HiringManager) Start(n int, autoScaleWorkers bool) {
 
 			amount := int(math.Ceil((float64(h.throughput) * float64(averageLatency) / 1000000.0) / float64(averageCharge)))
 			amountToHire := (amount - h.workerCount) / 2
-			log.Logvf(log.Info, "Target workers %d | Hiring %d", amount, amountToHire)
+			log.Logvf(log.Info, "Manager wants a total of workers %d; thus an additional %d workers will be hired", amount, amountToHire)
 			if amountToHire <= 0 || amountToHire > 100 || h.WasRecentlyRateLimited() {
 				break
 			}
@@ -102,18 +106,18 @@ func (h *HiringManager) Start(n int, autoScaleWorkers bool) {
 			for i := 0; i < amountToHire; i++ {
 				h.HireNewWorker()
 			}
-			log.Logvf(log.Info, "Manager thinks we can move faster; there are now %d workers", h.workerCount)
+			log.Logvf(log.Info, "There are now a total of %d workers", h.workerCount)
 			sleepTime = sleepTime + (3 * time.Second)
 		}
 
-		log.Logv(log.Info, "Hiring manager has stopped mass hiring; switching to single hire")
+		log.Logv(log.Info, "Hiring manager has stopped mass hiring; switching to single hires")
 
 		for {
 			// The Hiring manager is vulnerable to sudden changes, need further work on this.
-			time.Sleep(5 * time.Second)
+			time.Sleep(10 * time.Second)
 
 			if h.WasRecentlyRateLimited() {
-				time.Sleep(10 * time.Second)
+				time.Sleep(30 * time.Second)
 				continue
 			}
 
@@ -133,7 +137,9 @@ func (h *HiringManager) HireNewWorker() {
 	h.workerWg.Add(1)
 	go func() {
 		defer h.workerWg.Done()
-		h.Action(h, newWorkerID)
+		if err := h.AddWorkerAction(h, newWorkerID); err != nil {
+			log.Logvf(log.Always, "Worker %d exiting due to an error: %v", newWorkerID, err)
+		}
 	}()
 }
 
