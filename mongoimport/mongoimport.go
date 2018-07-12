@@ -664,7 +664,9 @@ func (imp *MongoImport) CountDocumentsInCosmosDb() error {
 	defer session.Close()
 
 	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
-	cosmosdb.VerifyDocumentCount(collection, imp.insertionCount)
+	if err := cosmosdb.GetDocumentCount(collection); err != nil {
+		return err
+	}
 
 	return nil
 }
