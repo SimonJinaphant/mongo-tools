@@ -69,6 +69,15 @@ func VerifyDocumentCount(collection *mgo.Collection, expectedCount uint64) error
 	}
 }
 
+func GetDocumentCount(collection *mgo.Collection) error {
+	currentCount, countErr := collection.Count()
+	if countErr != nil {
+		return countErr
+	}
+	log.Logvf(log.Always, "%s has a total of %d documents in Azure Cosmos DB", collection.Name, currentCount)
+	return nil
+}
+
 func ValidateSizeRequirement(shardKey string, fileSize int64, ignoreSizeWarning bool) error {
 	log.Logvf(log.Info, "File size is: %d", fileSize)
 	if shardKey == "" {
