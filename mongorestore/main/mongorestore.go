@@ -12,6 +12,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/mongodb/mongo-tools/common/cosmosdb"
 	"github.com/mongodb/mongo-tools/common/db"
 	"github.com/mongodb/mongo-tools/common/log"
 	"github.com/mongodb/mongo-tools/common/options"
@@ -99,6 +100,7 @@ func main() {
 
 	finishedChan := signals.HandleWithInterrupt(restore.HandleInterrupt)
 	defer close(finishedChan)
+	defer cosmosdb.BenchmarkTime(time.Now(), "Restore")
 
 	if err = restore.Restore(); err != nil {
 		log.Logvf(log.Always, "Failed: %v", err)

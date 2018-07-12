@@ -12,12 +12,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/globalsign/mgo/bson"
+	"github.com/mongodb/mongo-tools/common/cosmosdb"
 	"github.com/mongodb/mongo-tools/common/db"
 	"github.com/mongodb/mongo-tools/common/intents"
 	"github.com/mongodb/mongo-tools/common/log"
 	"github.com/mongodb/mongo-tools/common/progress"
 	"github.com/mongodb/mongo-tools/common/util"
-	"github.com/globalsign/mgo/bson"
 )
 
 const insertBufferFactor = 16
@@ -87,7 +88,11 @@ func (restore *MongoRestore) RestoreIntents() error {
 
 // RestoreIntent attempts to restore a given intent into MongoDB.
 func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
-
+	if strings.Contains(restore.ToolOptions.Host, ".documents.azure.com") {
+		if err := cosmosdb.ValidateSizeRequirement(restore.ToolOptions.General.ShardKey, intent.Size, restore.ToolOptions.General.IgnoreSizeWarning); err != nil {
+			return err
+		}
+	}
 	collectionExists, err := restore.CollectionExists(intent)
 	if err != nil {
 		return fmt.Errorf("error reading database: %v", err)
@@ -107,6 +112,10 @@ func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
 				err = restore.DropCollection(intent)
 				if err != nil {
 					return err // no context needed
+				}
+				if strings.Contains(restore.ToolOptions.Host, ".documents.azure.com") {
+					log.Logv(log.Always, "The Cosmos DB collection was dropped!, let's give Cosmos DB 5 seconds to clear out its cache")
+					time.Sleep(5 * time.Second)
 				}
 				collectionExists = false
 			}
@@ -190,12 +199,31 @@ func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
 			options = nil
 		}
 	}
+
+	// TODO: Define logic to handle existing CosmosDB collection
 	if !collectionExists {
 		log.Logvf(log.Info, "creating collection %v %s", intent.Namespace(), logMessageSuffix)
 		log.Logvf(log.DebugHigh, "using collection options: %#v", options)
-		err = restore.CreateCollection(intent, options, uuid)
-		if err != nil {
-			return fmt.Errorf("error creating collection %v: %v", intent.Namespace(), err)
+		if strings.Contains(restore.ToolOptions.Host, ".documents.azure.com") {
+			log.Logvf(log.Info, "We're targetting a Cosmos DB URI, let's create a custom collection")
+			session, _ := restore.SessionProvider.GetSession()
+			collection := session.DB(intent.DB).C(intent.C)
+			err := cosmosdb.CreateCustomCosmosDB(cosmosdb.CosmosDBCollectionInfo{
+				Throughput: restore.ToolOptions.General.Throughput,
+				ShardKey:   restore.ToolOptions.General.ShardKey,
+			}, collection)
+			collection.Database.Session.Close()
+
+			if err != nil {
+				log.Logvf(log.Always, "Unable to create collection: %s", collection.Name)
+				log.Logv(log.Always, "If the collection already exist please re-run the tool with `--drop` to delete the pre-existing collection")
+				return err
+			}
+		} else {
+			// TODO: Mongorestore seems to be creating collections with extra parameters, need to check if we need this as well
+			if err = restore.CreateCollection(intent, options, uuid); err != nil {
+				return fmt.Errorf("error creating collection %v: %v", intent.Namespace(), err)
+			}
 		}
 	} else {
 		log.Logvf(log.Info, "collection %v already exists - skipping collection create", intent.Namespace())
@@ -265,7 +293,7 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 	}
 
 	docChan := make(chan bson.Raw, insertBufferFactor)
-	resultChan := make(chan error, maxInsertWorkers)
+	backupDocChan := make(chan bson.Raw, insertBufferFactor*100)
 
 	// stream documents for this collection on docChan
 	go func() {
@@ -287,63 +315,90 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 		close(docChan)
 	}()
 
-	log.Logvf(log.DebugLow, "using %v insertion workers", maxInsertWorkers)
+	log.Logvf(log.Info, "using %v insertion workers", maxInsertWorkers)
+	manager := cosmosdb.NewHiringManager(maxInsertWorkers, restore.ToolOptions.General.Throughput)
+	manager.AddWorkerAction = func(manager *cosmosdb.HiringManager, workerId int) error {
+		s := session.Copy()
+		defer s.Close()
+		coll := collection.With(s)
+		inserter := cosmosdb.NewCosmosDbInserter(coll)
+		waitTime := 0
+		for {
+			time.Sleep(time.Duration(waitTime) * time.Millisecond)
+			select {
+			case managerMsg := <-manager.ManagerChannels[workerId]:
+				switch managerMsg {
+				case cosmosdb.MsgSlowdown:
+					waitTime += 500
+					log.Logvf(log.Info, "Worker %d was told to slow down; it will now await %d ms between operations", workerId, waitTime)
+				case cosmosdb.MsgSpeedup:
+					waitTime -= 500
+					log.Logvf(log.Info, "Worker %d was told to speed back up; it will now await %d ms between operations", workerId, waitTime)
+				default:
+					log.Logvf(log.Info, "Worker %d got an unknown message from manager", workerId)
+				}
 
-	for i := 0; i < maxInsertWorkers; i++ {
-		go func() {
-			// get a session copy for each insert worker
-			s := session.Copy()
-			defer s.Close()
-
-			coll := collection.With(s)
-			bulk := db.NewBufferedBulkInserter(
-				coll, restore.OutputOptions.BulkBufferSize, !restore.OutputOptions.StopOnError)
-			for rawDoc := range docChan {
-				if restore.objCheck {
-					err := bson.Unmarshal(rawDoc.Data, &bson.D{})
-					if err != nil {
-						resultChan <- fmt.Errorf("invalid object: %v", err)
-						return
+			case backupDoc := <-backupDocChan:
+				log.Logvf(log.Info, "Worker %d picked up a document from the backup channel", workerId)
+				if err := inserter.Insert(backupDoc, manager, workerId); err != nil {
+					if err = cosmosdb.FilterUnrecoverableErrors(restore.OutputOptions.StopOnError, err); err != nil {
+						return err
 					}
 				}
-				if err := bulk.Insert(rawDoc); err != nil {
-					if db.IsConnectionError(err) || restore.OutputOptions.StopOnError {
-						// Propagate this error, since it's either a fatal connection error
-						// or the user has turned on --stopOnError
-						resultChan <- err
-					} else {
-						// Otherwise just log the error but don't propagate it.
-						log.Logvf(log.Always, "error: %v", err)
-					}
-				}
-				watchProgressor.Set(file.Pos())
-			}
-			err := bulk.Flush()
-			if err != nil {
-				if !db.IsConnectionError(err) && !restore.OutputOptions.StopOnError {
-					// Suppress this error since it's not a severe connection error and
-					// the user has not specified --stopOnError
-					log.Logvf(log.Always, "error: %v", err)
-					err = nil
-				}
-			}
-			resultChan <- err
-			return
-		}()
 
-		// sleep to prevent all threads from inserting at the same time at start
-		time.Sleep(time.Duration(i) * 10 * time.Millisecond)
+			default:
+				document, alive := <-docChan
+				if !alive {
+					return nil
+				}
+
+				if err := inserter.Insert(document, manager, workerId); err != nil {
+					log.Logvf(log.Info, "Worker %d is backing up a document due to an error: %v", workerId, err)
+					backupDocChan <- document
+
+					if err = cosmosdb.FilterUnrecoverableErrors(restore.OutputOptions.StopOnError, err); err != nil {
+						return err
+					}
+
+					log.Logvf(log.Info, "Worker %d is able to recover from the error and go back in action", workerId)
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+			}
+			watchProgressor.Set(file.Pos())
+		}
+		return nil
 	}
 
-	// wait until all insert jobs finish
-	for done := 0; done < maxInsertWorkers; done++ {
-		err := <-resultChan
-		if err != nil {
-			return int64(0), fmt.Errorf("insertion error: %v", err)
+	manager.Start(maxInsertWorkers, restore.ToolOptions.General.DisableWorkerScaling)
+	manager.AwaitAllWorkers()
+
+	close(backupDocChan)
+	if len(backupDocChan) != 0 {
+		log.Logvf(log.Always, "%d document(s) previously failed to be restored.", len(backupDocChan))
+		log.Logv(log.Always, "Sometimes a document could have successfully been inserted and then something else failed; you may see duplicate key errors as they are being restored again")
+
+		s := session.Copy()
+		defer s.Close()
+		coll := collection.With(s)
+		inserter := cosmosdb.NewCosmosDbInserter(coll)
+
+		for doc := range backupDocChan {
+			if err := inserter.Insert(doc, manager, 1); err != nil {
+				if err = cosmosdb.FilterUnrecoverableErrors(restore.OutputOptions.StopOnError, err); err != nil {
+					return 0, err
+				}
+			}
 		}
 	}
 
-	// final error check
+	s := session.Copy()
+	defer s.Close()
+	coll := collection.With(s)
+	if err = cosmosdb.VerifyDocumentCount(coll, uint64(documentCount)); err != nil {
+		return int64(0), err
+	}
+
 	if err = bsonSource.Err(); err != nil {
 		return int64(0), fmt.Errorf("reading bson input: %v", err)
 	}

@@ -98,6 +98,12 @@ type General struct {
 
 	MaxProcs   int    `long:"numThreads" hidden:"true"`
 	Failpoints string `long:"failpoints" hidden:"true"`
+
+	Throughput int    `long:"throughput" value-name:"<number>" default:"10000" description:"Throughput to set on an Azure Cosmos DB collection"`
+	ShardKey   string `long:"shardKey" value-name:"<field>" description:"Shard key for partitioning on Azure Cosmos DB; specifying this key will set the collection size to be 'Unlimited' instead of 'Fixed', which also raises the maximum Request Units from 10,000 RU to 50,000 RU"`
+
+	IgnoreSizeWarning    bool `long:"ignoreSizeWarning" default:"false" description:"Disable the size warning when importing into Azure Cosmos DB"`
+	DisableWorkerScaling bool `long:"disableWorkerScaling" default:"false" description:"Disable the scaling of Insertion workers"`
 }
 
 // Struct holding verbosity-related options

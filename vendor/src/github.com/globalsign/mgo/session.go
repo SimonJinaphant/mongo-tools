@@ -45,7 +45,6 @@ import (
 	"time"
 
 	"github.com/globalsign/mgo/bson"
-	logger "github.com/mongodb/mongo-tools/common/log"
 )
 
 // Mode read preference mode. See Eventual, Monotonic and Strong for details
@@ -2855,15 +2854,16 @@ func (c *Collection) Insert(docs ...interface{}) error {
 	return err
 }
 
-// Insert with the insert op directly (For performance)
+// InsertWithOp is exposed for performance, allowing an insertion operation to be re-tried without
+// having to recreate the operation object again.
 func (c *Collection) InsertWithOp(op *InsertOperation) (latency int64, err error) {
 	startTime := time.Now()
-	_, err = c.writeOp(op.Op, true)
-	endTime := time.Now()
-	latency = endTime.Sub(startTime).Nanoseconds() / 1000
-	if err != nil {
+
+	if _, err = c.writeOp(op.Op, true); err != nil {
 		return -1, err
 	}
+
+	latency = time.Now().Sub(startTime).Nanoseconds() / 1000
 	return latency, err
 }
 
@@ -3189,10 +3189,17 @@ func (c *Collection) GetLastRequestStatistics() (charge int64, err error) {
 	cmd := make(bson.D, 0, 4)
 	cmd = append(cmd, bson.DocElem{"getLastRequestStatistics", "1"})
 
-	err = c.Database.Run(cmd, &result)
-	m := result.Map()
-	charge = int64(math.Ceil(m["RequestCharge"].(float64)))
+	if err = c.Database.Run(cmd, &result); err != nil {
+		return 0, err
+	}
 
+	m := result.Map()
+	mcharge := m["RequestCharge"]
+	if mcharge == nil {
+		return 0, fmt.Errorf("Unable to extract map %v with item $v", m, mcharge)
+	}
+
+	charge = int64(math.Ceil(mcharge.(float64)))
 	return charge, err
 }
 
@@ -5158,43 +5165,6 @@ func (r *writeCmdResult) BulkErrorCases() []BulkErrorCase {
 		ecases[i] = BulkErrorCase{err.Index, &QueryError{Code: err.Code, Message: err.ErrMsg}}
 	}
 	return ecases
-}
-
-// RetryableWriteOp will retry write operations for a time period
-func (c *Collection) RetryableWriteOp(op interface{}, ordered bool) (lerr *LastError, err error) {
-	opStartTime := time.Now()
-	opDeadline := opStartTime.Add(5 * time.Second)
-
-retry:
-	lerr, err = c.writeOp(op, ordered)
-	if err != nil {
-		if qerr, ok := err.(*QueryError); ok {
-			switch qerr.Code {
-
-			// TooManyRequest
-			case 16500:
-				//logger.Logvf(logger.Always, "We're overloading Cosmos DB; let's wait",)
-				time.Sleep(5 * time.Millisecond)
-
-				if time.Now().After(opDeadline) {
-					logger.Logv(logger.Always, "Maximum throughput retry exceeded 5 seconds; moving on")
-				} else {
-					goto retry
-				}
-
-			// Malformed Request
-			case 9:
-				logger.Logv(logger.Always, "The request sent was malformed")
-
-			default:
-				logger.Logvf(logger.Always, "Unknown err case: %s", err)
-			}
-		} else {
-			logger.Logvf(logger.Always, "Received something that is not a QueryError: %v", err)
-		}
-		return lerr, err
-	}
-	return nil, nil
 }
 
 // writeOp runs the given modifying operation, potentially followed up

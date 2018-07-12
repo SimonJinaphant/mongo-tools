@@ -12,6 +12,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/mongodb/mongo-tools/common/cosmosdb"
 	"github.com/mongodb/mongo-tools/common/db"
 	"github.com/mongodb/mongo-tools/common/log"
 	"github.com/mongodb/mongo-tools/common/options"
@@ -19,11 +20,6 @@ import (
 	"github.com/mongodb/mongo-tools/common/util"
 	"github.com/mongodb/mongo-tools/mongoimport"
 )
-
-func timeTrack(start time.Time, name string) {
-	elapsed := time.Since(start)
-	log.Logvf(log.Always, "%s took %s", name, elapsed)
-}
 
 func main() {
 	// initialize command-line opts
@@ -58,14 +54,7 @@ func main() {
 
 	// verify uri options and log them
 	opts.URI.LogUnsupportedOptions()
-	for i := 0; i < ingestOpts.ImportCycle; i++ {
-		log.Logvf(log.Info, "Import cycle: %d", i)
-		importCycle(opts, inputOpts, ingestOpts, args)
-	}
-}
-
-func importCycle(opts *options.ToolOptions, inputOpts *mongoimport.InputOptions, ingestOpts *mongoimport.IngestOptions, args []string) {
-	defer timeTrack(time.Now(), "Import")
+	defer cosmosdb.BenchmarkTime(time.Now(), "Import")
 	// create a session provider to connect to the db
 	sessionProvider, err := db.NewSessionProvider(*opts)
 	if err != nil {
@@ -102,9 +91,4 @@ func importCycle(opts *options.ToolOptions, inputOpts *mongoimport.InputOptions,
 	if err != nil {
 		os.Exit(util.ExitError)
 	}
-
-	if err := m.CountDocumentsInCosmosDb(); err != nil {
-		log.Logvf(log.Always, "Unable to count the documents in the imported collection: %v", err)
-	}
-
 }
