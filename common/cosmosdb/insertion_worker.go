@@ -88,7 +88,6 @@ func (iw *InsertionWorker) Run(messageChannel <-chan HiringManagerMessage, backu
 			iw.OnDocumentIngestion()
 		}
 	}
-	return nil
 }
 
 func (iw *InsertionWorker) insert(doc interface{}) error {
