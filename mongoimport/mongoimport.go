@@ -8,8 +8,6 @@
 package mongoimport
 
 import (
-	"time"
-
 	"github.com/globalsign/mgo"
 	"github.com/globalsign/mgo/bson"
 	"github.com/mongodb/mongo-tools/common/cosmosdb"
@@ -433,24 +431,12 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
 	numInsertionWorkers := imp.IngestOptions.NumInsertionWorkers
 	log.Logvf(log.Info, "Assigning %d insertion workers", numInsertionWorkers)
-	backupDocChan := make(chan bson.D, workerBufferSize*100)
+
+	backupDocChan := make(chan interface{}, workerBufferSize*100)
+	ingestionChannel := make(chan interface{}, workerBufferSize)
 
 	manager := cosmosdb.NewHiringManager(numInsertionWorkers, imp.ToolOptions.General.Throughput)
 	manager.AddWorkerAction = func(manager *cosmosdb.HiringManager, workerId int) error {
-		err := imp.runInsertionWorker(readDocs, backupDocChan, manager, workerId)
-		if err != nil {
-			imp.Kill(err)
-		}
-		return nil
-	}
-
-	manager.Start(numInsertionWorkers, imp.ToolOptions.General.DisableWorkerScaling)
-	manager.AwaitAllWorkers()
-
-	close(backupDocChan)
-	if len(backupDocChan) != 0 {
-		log.Logvf(log.Always, "%d document(s) previously failed to be restored.", len(backupDocChan))
-		log.Logv(log.Always, "Sometimes a document could have successfully been inserted and then something else failed; you may see duplicate key errors as they are being restored again")
 		session, err := imp.SessionProvider.GetSession()
 		if err != nil {
 			return fmt.Errorf("error connecting to mongod: %v", err)
@@ -460,16 +446,30 @@ func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
 			return fmt.Errorf("error configuring session: %v", err)
 		}
 		collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
-		inserter := cosmosdb.NewCosmosDbInserter(collection)
 
-		for doc := range backupDocChan {
+		worker := cosmosdb.NewInsertionWorker(collection, manager, ingestionChannel, backupDocChan, workerId, imp.IngestOptions.StopOnError)
+		worker.OnDocumentIngestion = func() {
 			atomic.AddUint64(&imp.insertionCount, 1)
-			if err := inserter.Insert(doc, manager, 1); err != nil {
-				if err = cosmosdb.FilterUnrecoverableErrors(imp.IngestOptions.StopOnError, err); err != nil {
-					return err
-				}
-			}
 		}
+		if err := worker.Run(); err != nil {
+			return err
+		}
+
+		return nil
+	}
+
+	manager.Start(numInsertionWorkers, imp.ToolOptions.General.DisableWorkerScaling)
+	go func() {
+		for doc := range readDocs {
+			ingestionChannel <- doc
+		}
+		close(ingestionChannel)
+	}()
+	manager.AwaitAllWorkers()
+
+	close(backupDocChan)
+	if len(backupDocChan) != 0 {
+		log.Logvf(log.Always, "%d document(s) previously failed to be restored.", len(backupDocChan))
 	}
 	retErr = imp.CountDocumentsInCosmosDb()
 	return
@@ -499,67 +499,6 @@ func (imp *MongoImport) configureSession(session *mgo.Session) error {
 type flushInserter interface {
 	Insert(doc interface{}) error
 	Flush() error
-}
-
-// runInsertionWorker is a helper to InsertDocuments - it reads document off
-// the read channel and prepares then in batches for insertion into the databas
-func (imp *MongoImport) runInsertionWorker(readDocs chan bson.D, backupDocChan chan bson.D, manager *cosmosdb.HiringManager, workerId int) (err error) {
-	session, err := imp.SessionProvider.GetSession()
-	if err != nil {
-		return fmt.Errorf("error connecting to mongod: %v", err)
-	}
-	defer session.Close()
-	if err = imp.configureSession(session); err != nil {
-		return fmt.Errorf("error configuring session: %v", err)
-	}
-	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
-	inserter := cosmosdb.NewCosmosDbInserter(collection)
-	waitTime := 0
-	for {
-		time.Sleep(time.Duration(waitTime) * time.Millisecond)
-		select {
-		case managerMsg := <-manager.ManagerChannels[workerId]:
-			switch managerMsg {
-			case cosmosdb.MsgSlowdown:
-				waitTime += 500
-				log.Logvf(log.Info, "Worker %d was told to slow down; it will now await %d ms between operations", workerId, waitTime)
-			case cosmosdb.MsgSpeedup:
-				waitTime -= 500
-				log.Logvf(log.Info, "Worker %d was told to speed back up; it will now await %d ms between operations", workerId, waitTime)
-			default:
-				log.Logvf(log.Info, "Worker %d got an unknown message from manager", workerId)
-			}
-
-		case backupDoc := <-backupDocChan:
-			log.Logvf(log.Info, "Worker %d picked up a document from the backup channel", workerId)
-			if err := inserter.Insert(backupDoc, manager, workerId); err != nil {
-				if err = cosmosdb.FilterUnrecoverableErrors(imp.IngestOptions.StopOnError, err); err != nil {
-					return err
-				}
-			}
-
-		default:
-			document, alive := <-readDocs
-			if !alive {
-				return nil
-			}
-			if err := inserter.Insert(document, manager, workerId); err != nil {
-				log.Logvf(log.Info, "Worker %d is backing up a document due to an error: %v", workerId, err)
-				backupDocChan <- document
-
-				if err = cosmosdb.FilterUnrecoverableErrors(imp.IngestOptions.StopOnError, err); err != nil {
-					return err
-				}
-
-				log.Logvf(log.Info, "Worker %d is able to recover from the error and go back in action", workerId)
-				time.Sleep(100 * time.Millisecond)
-				continue
-			}
-		}
-		atomic.AddUint64(&imp.insertionCount, 1)
-	}
-
-	return nil
 }
 
 type upserter struct {

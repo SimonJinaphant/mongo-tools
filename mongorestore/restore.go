@@ -293,8 +293,6 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 	}
 
 	docChan := make(chan bson.Raw, insertBufferFactor)
-	backupDocChan := make(chan bson.Raw, insertBufferFactor*100)
-
 	// stream documents for this collection on docChan
 	go func() {
 		doc := bson.Raw{}
@@ -316,80 +314,39 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 	}()
 
 	log.Logvf(log.Info, "using %v insertion workers", maxInsertWorkers)
+
+	ingestionChannel := make(chan interface{}, insertBufferFactor)
+	backupDocChan := make(chan interface{}, insertBufferFactor*100)
+
 	manager := cosmosdb.NewHiringManager(maxInsertWorkers, restore.ToolOptions.General.Throughput)
 	manager.AddWorkerAction = func(manager *cosmosdb.HiringManager, workerId int) error {
 		s := session.Copy()
 		defer s.Close()
-		coll := collection.With(s)
-		inserter := cosmosdb.NewCosmosDbInserter(coll)
-		waitTime := 0
-		for {
-			time.Sleep(time.Duration(waitTime) * time.Millisecond)
-			select {
-			case managerMsg := <-manager.ManagerChannels[workerId]:
-				switch managerMsg {
-				case cosmosdb.MsgSlowdown:
-					waitTime += 500
-					log.Logvf(log.Info, "Worker %d was told to slow down; it will now await %d ms between operations", workerId, waitTime)
-				case cosmosdb.MsgSpeedup:
-					waitTime -= 500
-					log.Logvf(log.Info, "Worker %d was told to speed back up; it will now await %d ms between operations", workerId, waitTime)
-				default:
-					log.Logvf(log.Info, "Worker %d got an unknown message from manager", workerId)
-				}
+		collection := collection.With(s)
 
-			case backupDoc := <-backupDocChan:
-				log.Logvf(log.Info, "Worker %d picked up a document from the backup channel", workerId)
-				if err := inserter.Insert(backupDoc, manager, workerId); err != nil {
-					if err = cosmosdb.FilterUnrecoverableErrors(restore.OutputOptions.StopOnError, err); err != nil {
-						return err
-					}
-				}
-
-			default:
-				document, alive := <-docChan
-				if !alive {
-					return nil
-				}
-
-				if err := inserter.Insert(document, manager, workerId); err != nil {
-					log.Logvf(log.Info, "Worker %d is backing up a document due to an error: %v", workerId, err)
-					backupDocChan <- document
-
-					if err = cosmosdb.FilterUnrecoverableErrors(restore.OutputOptions.StopOnError, err); err != nil {
-						return err
-					}
-
-					log.Logvf(log.Info, "Worker %d is able to recover from the error and go back in action", workerId)
-					time.Sleep(100 * time.Millisecond)
-					continue
-				}
-			}
+		worker := cosmosdb.NewInsertionWorker(collection, manager, ingestionChannel, backupDocChan, workerId, restore.OutputOptions.StopOnError)
+		worker.OnDocumentIngestion = func() {
 			watchProgressor.Set(file.Pos())
 		}
+		if err := worker.Run(); err != nil {
+			return err
+		}
+
 		return nil
 	}
 
 	manager.Start(maxInsertWorkers, restore.ToolOptions.General.DisableWorkerScaling)
+	go func() {
+		for doc := range docChan {
+			ingestionChannel <- doc
+		}
+		close(ingestionChannel)
+	}()
 	manager.AwaitAllWorkers()
 
 	close(backupDocChan)
 	if len(backupDocChan) != 0 {
 		log.Logvf(log.Always, "%d document(s) previously failed to be restored.", len(backupDocChan))
-		log.Logv(log.Always, "Sometimes a document could have successfully been inserted and then something else failed; you may see duplicate key errors as they are being restored again")
-
-		s := session.Copy()
-		defer s.Close()
-		coll := collection.With(s)
-		inserter := cosmosdb.NewCosmosDbInserter(coll)
-
-		for doc := range backupDocChan {
-			if err := inserter.Insert(doc, manager, 1); err != nil {
-				if err = cosmosdb.FilterUnrecoverableErrors(restore.OutputOptions.StopOnError, err); err != nil {
-					return 0, err
-				}
-			}
-		}
 	}
 
 	s := session.Copy()
