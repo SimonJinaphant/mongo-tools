@@ -29,8 +29,7 @@ type InsertionWorker struct {
 }
 
 func NewInsertionWorker(collection *mgo.Collection, manager *HiringManager,
-	ingestionChannel chan interface{},
-	workerID int, stopOnError bool) *InsertionWorker {
+	ingestionChannel chan interface{}, workerID int, stopOnError bool) *InsertionWorker {
 
 	return &InsertionWorker{
 		collection:       collection,

@@ -316,6 +316,7 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 
 	log.Logvf(log.Info, "using %v insertion workers", maxInsertWorkers)
 
+	// Pipe the bson.Raw into a generic type channel for the workers to read from.
 	ingestionChannel := make(chan interface{}, insertBufferFactor)
 	go func() {
 		for doc := range docChan {

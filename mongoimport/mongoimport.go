@@ -432,8 +432,8 @@ func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) error {
 	numInsertionWorkers := imp.IngestOptions.NumInsertionWorkers
 	log.Logvf(log.Info, "Assigning %d insertion workers", numInsertionWorkers)
 
+	// Pipe the bson.D into a generic type channel for the workers to read from.
 	ingestionChannel := make(chan interface{}, workerBufferSize)
-
 	go func() {
 		for doc := range readDocs {
 			ingestionChannel <- doc
