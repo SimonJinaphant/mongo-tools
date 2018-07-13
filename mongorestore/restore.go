@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/globalsign/mgo"
 	"github.com/globalsign/mgo/bson"
 	"github.com/mongodb/mongo-tools/common/cosmosdb"
 	"github.com/mongodb/mongo-tools/common/db"
@@ -316,8 +317,6 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 	log.Logvf(log.Info, "using %v insertion workers", maxInsertWorkers)
 
 	ingestionChannel := make(chan interface{}, insertBufferFactor)
-	backupDocChan := make(chan interface{}, insertBufferFactor*100)
-
 	go func() {
 		for doc := range docChan {
 			ingestionChannel <- doc
@@ -325,26 +324,15 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 		close(ingestionChannel)
 	}()
 
-	manager := cosmosdb.NewHiringManager(maxInsertWorkers, restore.ToolOptions.General.Throughput)
-	manager.AddWorkerAction = func(manager *cosmosdb.HiringManager, workerId int) error {
-		s := session.Copy()
-		defer s.Close()
-		collection := collection.With(s)
-
-		worker := cosmosdb.NewInsertionWorker(collection, manager, ingestionChannel, backupDocChan, workerId, restore.OutputOptions.StopOnError)
-		worker.OnDocumentIngestion = func() {
-			watchProgressor.Set(file.Pos())
-		}
-		return worker.Run()
+	manager := cosmosdb.NewHiringManager(ingestionChannel, maxInsertWorkers, restore.ToolOptions.General.Throughput, dbName, colName, restore.OutputOptions.StopOnError)
+	manager.SpecifySession = func() (*mgo.Session, error) {
+		return session.Copy(), nil
 	}
-
+	manager.OnDocumentIngestion = func() {
+		watchProgressor.Set(file.Pos())
+	}
 	manager.Start(maxInsertWorkers, restore.ToolOptions.General.DisableWorkerScaling)
 	manager.AwaitAllWorkers()
-
-	close(backupDocChan)
-	if len(backupDocChan) != 0 {
-		log.Logvf(log.Always, "%d document(s) previously failed to be restored.", len(backupDocChan))
-	}
 
 	s := session.Copy()
 	defer s.Close()

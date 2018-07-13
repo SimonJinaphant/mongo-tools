@@ -23,32 +23,30 @@ type InsertionWorker struct {
 	collection          *mgo.Collection
 	manager             *HiringManager
 	ingestionChannel    chan interface{}
-	backupChannel       chan interface{}
 	workerID            int
 	stopOnError         bool
 	OnDocumentIngestion func()
 }
 
 func NewInsertionWorker(collection *mgo.Collection, manager *HiringManager,
-	ingestionChannel chan interface{}, backupChannel chan interface{},
+	ingestionChannel chan interface{},
 	workerID int, stopOnError bool) *InsertionWorker {
 
 	return &InsertionWorker{
 		collection:       collection,
 		manager:          manager,
 		ingestionChannel: ingestionChannel,
-		backupChannel:    backupChannel,
 		workerID:         workerID,
 		stopOnError:      stopOnError,
 	}
 }
 
-func (iw *InsertionWorker) Run() error {
+func (iw *InsertionWorker) Run(messageChannel <-chan HiringManagerMessage, backupChannel chan interface{}) error {
 	waitTime := 0
 	for {
 		time.Sleep(time.Duration(waitTime) * time.Millisecond)
 		select {
-		case managerMsg := <-iw.manager.ManagerChannels[iw.workerID]:
+		case managerMsg := <-messageChannel:
 			switch managerMsg {
 			case MsgSlowdown:
 				waitTime += awaitBetweenOpTime
@@ -60,7 +58,7 @@ func (iw *InsertionWorker) Run() error {
 				log.Logvf(log.Info, "Worker %d got an unknown message from manager", iw.workerID)
 			}
 
-		case backupDoc := <-iw.backupChannel:
+		case backupDoc := <-backupChannel:
 			log.Logvf(log.Info, "Worker %d picked up a document from the backup channel", iw.workerID)
 			if err := iw.insert(backupDoc); err != nil {
 				if err = FilterUnrecoverableErrors(iw.stopOnError, err); err != nil {
@@ -76,7 +74,7 @@ func (iw *InsertionWorker) Run() error {
 
 			if err := iw.insert(document); err != nil {
 				log.Logvf(log.Info, "Worker %d is backing up a document due to an error: %v", iw.workerID, err)
-				iw.backupChannel <- document
+				backupChannel <- document
 
 				if err = FilterUnrecoverableErrors(iw.stopOnError, err); err != nil {
 					return err

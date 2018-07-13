@@ -428,12 +428,11 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 // ingestDocuments accepts a channel from which it reads documents to be inserted
 // into the target collection. It spreads the insert/upsert workload across one
 // or more workers.
-func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
+func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) error {
 	numInsertionWorkers := imp.IngestOptions.NumInsertionWorkers
 	log.Logvf(log.Info, "Assigning %d insertion workers", numInsertionWorkers)
 
 	ingestionChannel := make(chan interface{}, workerBufferSize)
-	backupDocChan := make(chan interface{}, workerBufferSize*100)
 
 	go func() {
 		for doc := range readDocs {
@@ -442,34 +441,34 @@ func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
 		close(ingestionChannel)
 	}()
 
-	manager := cosmosdb.NewHiringManager(numInsertionWorkers, imp.ToolOptions.General.Throughput)
-	manager.AddWorkerAction = func(manager *cosmosdb.HiringManager, workerId int) error {
+	manager := cosmosdb.NewHiringManager(ingestionChannel, numInsertionWorkers, imp.ToolOptions.General.Throughput,
+		imp.ToolOptions.DB, imp.ToolOptions.Collection, imp.IngestOptions.StopOnError)
+	manager.SpecifySession = func() (*mgo.Session, error) {
 		session, err := imp.SessionProvider.GetSession()
 		if err != nil {
-			return fmt.Errorf("error connecting to mongod: %v", err)
+			return nil, fmt.Errorf("error connecting to mongod: %v", err)
 		}
-		defer session.Close()
-		if err = imp.configureSession(session); err != nil {
-			return fmt.Errorf("error configuring session: %v", err)
-		}
-		collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
 
-		worker := cosmosdb.NewInsertionWorker(collection, manager, ingestionChannel, backupDocChan, workerId, imp.IngestOptions.StopOnError)
-		worker.OnDocumentIngestion = func() {
-			atomic.AddUint64(&imp.insertionCount, 1)
+		if err = imp.configureSession(session); err != nil {
+			return nil, fmt.Errorf("error configuring session: %v", err)
 		}
-		return worker.Run()
+		return session, nil
+	}
+	manager.OnDocumentIngestion = func() {
+		atomic.AddUint64(&imp.insertionCount, 1)
 	}
 
 	manager.Start(numInsertionWorkers, imp.ToolOptions.General.DisableWorkerScaling)
 	manager.AwaitAllWorkers()
 
-	close(backupDocChan)
-	if len(backupDocChan) != 0 {
-		log.Logvf(log.Always, "%d document(s) previously failed to be restored.", len(backupDocChan))
+	session, err := imp.SessionProvider.GetSession()
+	if err != nil {
+		return err
 	}
-	retErr = imp.CountDocumentsInCosmosDb()
-	return
+	defer session.Close()
+
+	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
+	return cosmosdb.GetDocumentCount(collection)
 }
 
 // configureSession takes in a session and modifies it with properly configured
@@ -590,19 +589,4 @@ func (imp *MongoImport) getInputReader(in io.Reader) (InputReader, error) {
 		return NewTSVInputReader(colSpecs, in, out, imp.IngestOptions.NumDecodingWorkers, ignoreBlanks), nil
 	}
 	return NewJSONInputReader(imp.InputOptions.JSONArray, in, imp.IngestOptions.NumDecodingWorkers), nil
-}
-
-func (imp *MongoImport) CountDocumentsInCosmosDb() error {
-	session, err := imp.SessionProvider.GetSession()
-	if err != nil {
-		return err
-	}
-	defer session.Close()
-
-	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
-	if err := cosmosdb.GetDocumentCount(collection); err != nil {
-		return err
-	}
-
-	return nil
 }

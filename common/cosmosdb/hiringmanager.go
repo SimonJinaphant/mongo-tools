@@ -6,51 +6,77 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/globalsign/mgo"
 	"github.com/mongodb/mongo-tools/common/log"
 )
 
 type HiringManagerMessage int
 
 const (
-	MsgSlowdown HiringManagerMessage = 1
-	MsgSpeedup  HiringManagerMessage = 2
+	MsgSlowdown      HiringManagerMessage = 1
+	MsgSpeedup       HiringManagerMessage = 2
+	backupBufferSize                      = 1000
 )
 
 type HiringManager struct {
 	latencyRecords     []int64
 	consumptionRecords []int64
+	recordWg           *sync.WaitGroup
 
+	throughput  int
+	workerCount int
+	workerWg    *sync.WaitGroup
+
+	managerChannels  []chan HiringManagerMessage
 	rateLimitCounter uint64
-	workerCount      int
-	throughput       int
+	slowDownCount    int
 
-	workerWg *sync.WaitGroup
-	recordWg *sync.WaitGroup
+	backupChannel chan interface{}
 
-	ManagerChannels []chan HiringManagerMessage
-	slowDownCount   int
+	OnDocumentIngestion func()
+	SpecifySession      func() (*mgo.Session, error)
 
-	AddWorkerAction func(manager *HiringManager, workerId int) error
+	databaseName     string
+	collectionName   string
+	stopOnError      bool
+	ingestionChannel chan interface{}
 }
 
-func NewHiringManager(defaultWorkers int, throughput int) *HiringManager {
+func NewHiringManager(ingestionChannel chan interface{}, defaultWorkers int, throughput int, databaseName string, collectionName string, stopOnError bool) *HiringManager {
 	return &HiringManager{
 		latencyRecords:     make([]int64, 0, defaultWorkers),
 		consumptionRecords: make([]int64, 0, defaultWorkers),
-		rateLimitCounter:   0,
-		workerCount:        0,
-		throughput:         throughput,
-		workerWg:           new(sync.WaitGroup),
 		recordWg:           new(sync.WaitGroup),
-		ManagerChannels:    make([]chan HiringManagerMessage, defaultWorkers),
-		slowDownCount:      0,
-		AddWorkerAction:    nil,
+
+		throughput:  throughput,
+		workerCount: 0,
+		workerWg:    new(sync.WaitGroup),
+
+		managerChannels:  make([]chan HiringManagerMessage, defaultWorkers),
+		rateLimitCounter: 0,
+		slowDownCount:    0,
+
+		backupChannel: make(chan interface{}, backupBufferSize),
+
+		OnDocumentIngestion: nil,
+		SpecifySession:      nil,
+
+		databaseName:     databaseName,
+		collectionName:   collectionName,
+		stopOnError:      stopOnError,
+		ingestionChannel: ingestionChannel,
 	}
 }
 
 func (h *HiringManager) AwaitAllWorkers() {
 	h.workerWg.Wait()
 	log.Logv(log.Info, "All workers have finished")
+
+	close(h.backupChannel)
+	if len(h.backupChannel) != 0 {
+		// TODO: Figure out what to do here... So far this part never seems to get invoke
+		log.Logvf(log.Always, "%d document(s) previously failed to be restored.", len(h.backupChannel))
+	}
 }
 
 func (h *HiringManager) CountWorkers() int {
@@ -74,8 +100,8 @@ func (h *HiringManager) Notify(workerId int, latency int64, charge int64) {
 
 // Start launches the manager routine which periodically checks whether it can add new workers to speed up the ingestion task
 func (h *HiringManager) Start(n int, disableWorkerScaling bool) {
-	if h.AddWorkerAction == nil {
-		log.Logv(log.Always, "Unable to start manager with no AddWorkerAction defined")
+	if h.SpecifySession == nil {
+		log.Logv(log.Always, "Unable to start manager with no session defined")
 		return
 	}
 	for i := 0; i < n; i++ {
@@ -157,19 +183,29 @@ func (h *HiringManager) Start(n int, disableWorkerScaling bool) {
 
 // HireNewWorker launches a new parallel worker to help with the ingestion work
 func (h *HiringManager) HireNewWorker() {
-	h.latencyRecords = append(h.latencyRecords, 0)
-	h.consumptionRecords = append(h.consumptionRecords, 0)
+	session, err := h.SpecifySession()
+	if err != nil {
+		log.Logvf(log.Always, "Unable to obtain session for new worker: %v", err)
+		return
+	}
+	collection := session.DB(h.databaseName).C(h.collectionName)
 
 	newWorkerID := h.workerCount
-	h.ManagerChannels = append(h.ManagerChannels, nil)
-	h.ManagerChannels[newWorkerID] = make(chan HiringManagerMessage, 10)
+	worker := NewInsertionWorker(collection, h, h.ingestionChannel, newWorkerID, h.stopOnError)
+	worker.OnDocumentIngestion = h.OnDocumentIngestion
 
-	h.workerCount++
+	h.latencyRecords = append(h.latencyRecords, 0)
+	h.consumptionRecords = append(h.consumptionRecords, 0)
+	h.managerChannels = append(h.managerChannels, nil)
+	h.managerChannels[newWorkerID] = make(chan HiringManagerMessage, 10)
 
 	h.workerWg.Add(1)
+	h.workerCount++
+
 	go func() {
+		defer session.Close()
 		defer h.workerWg.Done()
-		if err := h.AddWorkerAction(h, newWorkerID); err != nil {
+		if err := worker.Run(h.managerChannels[newWorkerID], h.backupChannel); err != nil {
 			log.Logvf(log.Always, "Worker %d exiting due to an error: %v", newWorkerID, err)
 		}
 	}()
@@ -192,7 +228,7 @@ func (h *HiringManager) slowdownWorker() {
 	if targetWorker >= h.workerCount {
 		targetWorker = targetWorker % h.workerCount
 	}
-	h.ManagerChannels[targetWorker] <- MsgSlowdown
+	h.managerChannels[targetWorker] <- MsgSlowdown
 	h.slowDownCount++
 }
 
@@ -207,6 +243,6 @@ func (h *HiringManager) speedupWorker() {
 		targetWorker = targetWorker % h.workerCount
 	}
 
-	h.ManagerChannels[targetWorker] <- MsgSpeedup
+	h.managerChannels[targetWorker] <- MsgSpeedup
 	h.slowDownCount--
 }
