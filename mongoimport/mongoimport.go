@@ -432,8 +432,15 @@ func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
 	numInsertionWorkers := imp.IngestOptions.NumInsertionWorkers
 	log.Logvf(log.Info, "Assigning %d insertion workers", numInsertionWorkers)
 
-	backupDocChan := make(chan interface{}, workerBufferSize*100)
 	ingestionChannel := make(chan interface{}, workerBufferSize)
+	backupDocChan := make(chan interface{}, workerBufferSize*100)
+
+	go func() {
+		for doc := range readDocs {
+			ingestionChannel <- doc
+		}
+		close(ingestionChannel)
+	}()
 
 	manager := cosmosdb.NewHiringManager(numInsertionWorkers, imp.ToolOptions.General.Throughput)
 	manager.AddWorkerAction = func(manager *cosmosdb.HiringManager, workerId int) error {
@@ -451,20 +458,10 @@ func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
 		worker.OnDocumentIngestion = func() {
 			atomic.AddUint64(&imp.insertionCount, 1)
 		}
-		if err := worker.Run(); err != nil {
-			return err
-		}
-
-		return nil
+		return worker.Run()
 	}
 
 	manager.Start(numInsertionWorkers, imp.ToolOptions.General.DisableWorkerScaling)
-	go func() {
-		for doc := range readDocs {
-			ingestionChannel <- doc
-		}
-		close(ingestionChannel)
-	}()
 	manager.AwaitAllWorkers()
 
 	close(backupDocChan)

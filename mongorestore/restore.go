@@ -318,6 +318,13 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 	ingestionChannel := make(chan interface{}, insertBufferFactor)
 	backupDocChan := make(chan interface{}, insertBufferFactor*100)
 
+	go func() {
+		for doc := range docChan {
+			ingestionChannel <- doc
+		}
+		close(ingestionChannel)
+	}()
+
 	manager := cosmosdb.NewHiringManager(maxInsertWorkers, restore.ToolOptions.General.Throughput)
 	manager.AddWorkerAction = func(manager *cosmosdb.HiringManager, workerId int) error {
 		s := session.Copy()
@@ -328,20 +335,10 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 		worker.OnDocumentIngestion = func() {
 			watchProgressor.Set(file.Pos())
 		}
-		if err := worker.Run(); err != nil {
-			return err
-		}
-
-		return nil
+		return worker.Run()
 	}
 
 	manager.Start(maxInsertWorkers, restore.ToolOptions.General.DisableWorkerScaling)
-	go func() {
-		for doc := range docChan {
-			ingestionChannel <- doc
-		}
-		close(ingestionChannel)
-	}()
 	manager.AwaitAllWorkers()
 
 	close(backupDocChan)
