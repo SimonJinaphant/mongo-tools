@@ -15,7 +15,7 @@ func BenchmarkTime(start time.Time, name string) {
 	log.Logvf(log.Always, "%s took %s", name, elapsed)
 }
 
-func FilterUnrecoverableErrors(stopOnError bool, err error) error {
+func FilterStandardErrors(stopOnError bool, err error) error {
 	if err.Error() == io.EOF.Error() {
 		return fmt.Errorf(db.ErrLostConnection)
 	}

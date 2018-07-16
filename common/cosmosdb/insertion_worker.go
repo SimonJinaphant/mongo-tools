@@ -1,6 +1,7 @@
 package cosmosdb
 
 import (
+	"strings"
 	"time"
 
 	"github.com/globalsign/mgo"
@@ -60,9 +61,15 @@ func (iw *InsertionWorker) Run(messageChannel <-chan InsertionManagerMessage, ba
 		case backupDoc := <-backupChannel:
 			log.Logvf(log.Info, "Worker %d picked up a document from the backup channel", iw.workerID)
 			if err := iw.insert(backupDoc); err != nil {
-				if err = FilterUnrecoverableErrors(iw.stopOnError, err); err != nil {
-					return err
+				if filterErr := FilterStandardErrors(iw.stopOnError, err); filterErr != nil {
+					return filterErr
 				}
+				if strings.Contains(err.Error(), "duplicate key") {
+					log.Logvf(log.Always, "Worker %d inserted a backup that seem to have previously succeeded", iw.workerID)
+					continue
+				}
+				log.Logvf(log.Always, "Worker %d failed to insert a backup document due to: %v", iw.workerID, err)
+				return err
 			}
 
 		default:
@@ -75,7 +82,7 @@ func (iw *InsertionWorker) Run(messageChannel <-chan InsertionManagerMessage, ba
 				log.Logvf(log.Info, "Worker %d is backing up a document due to an error: %v", iw.workerID, err)
 				backupChannel <- document
 
-				if err = FilterUnrecoverableErrors(iw.stopOnError, err); err != nil {
+				if err = FilterStandardErrors(iw.stopOnError, err); err != nil {
 					return err
 				}
 
