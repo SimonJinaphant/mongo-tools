@@ -201,23 +201,24 @@ func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
 		}
 	}
 
+	var cosmosDbCollection *cosmosdb.CosmosDBCollection
 	// TODO: Define logic to handle existing CosmosDB collection
 	if !collectionExists {
 		log.Logvf(log.Info, "creating collection %v %s", intent.Namespace(), logMessageSuffix)
 		log.Logvf(log.DebugHigh, "using collection options: %#v", options)
 		if strings.Contains(restore.ToolOptions.Host, ".documents.azure.com") {
-			log.Logvf(log.Info, "We're targetting a Cosmos DB URI, let's create a custom collection")
-			session, _ := restore.SessionProvider.GetSession()
-			collection := session.DB(intent.DB).C(intent.C)
-			err := cosmosdb.CreateCustomCosmosDB(cosmosdb.CosmosDBCollectionInfo{
-				Throughput: restore.ToolOptions.General.Throughput,
-				ShardKey:   restore.ToolOptions.General.ShardKey,
-			}, collection)
-			collection.Database.Session.Close()
+			log.Logvf(log.Info, "We're targetting an Azure Cosmos DB URI; creating a custom collection...")
+			session, serr := restore.SessionProvider.GetSession()
+			if serr != nil {
+				return serr
+			}
 
-			if err != nil {
-				log.Logvf(log.Always, "Unable to create collection: %s", collection.Name)
-				log.Logv(log.Always, "If the collection already exist please re-run the tool with `--drop` to delete the pre-existing collection")
+			cosmosDbCollection = cosmosdb.NewCollection(
+				session.DB(intent.DB).C(intent.C),
+				restore.ToolOptions.General.Throughput,
+				restore.ToolOptions.General.ShardKey,
+			)
+			if err := cosmosDbCollection.Deploy(); err != nil {
 				return err
 			}
 		} else {
@@ -242,8 +243,11 @@ func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
 
 		bsonSource := db.NewDecodedBSONSource(db.NewBSONSource(intent.BSONFile))
 		defer bsonSource.Close()
-
-		documentCount, err = restore.RestoreCollectionToDB(intent.DB, intent.C, bsonSource, intent.BSONFile, intent.Size)
+		if strings.Contains(restore.ToolOptions.Host, ".documents.azure.com") {
+			documentCount, err = restore.RestoreCollectionToCosmosDB(cosmosDbCollection, bsonSource, intent.BSONFile, intent.Size)
+		} else {
+			documentCount, err = restore.RestoreCollectionToDB(intent.DB, intent.C, bsonSource, intent.BSONFile, intent.Size)
+		}
 		if err != nil {
 			return fmt.Errorf("error restoring from %v: %v", intent.Location, err)
 		}
@@ -265,9 +269,7 @@ func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
 	return nil
 }
 
-// RestoreCollectionToDB pipes the given BSON data into the database.
-// Returns the number of documents restored and any errors that occured.
-func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
+func (restore *MongoRestore) RestoreCollectionToCosmosDB(cosmosDbCollection *cosmosdb.CosmosDBCollection,
 	bsonSource *db.DecodedBSONSource, file PosReader, fileSize int64) (int64, error) {
 
 	var termErr error
@@ -278,8 +280,8 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 	session.SetSafe(restore.safety)
 	defer session.Close()
 
-	collection := session.DB(dbName).C(colName)
-
+	dbName := cosmosDbCollection.Collection.Database.Name
+	colName := cosmosDbCollection.Collection.Name
 	documentCount := int64(0)
 	watchProgressor := progress.NewCounter(fileSize)
 	if restore.ProgressManager != nil {
@@ -325,7 +327,7 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 		close(ingestionChannel)
 	}()
 
-	manager := cosmosdb.NewHiringManager(ingestionChannel, maxInsertWorkers, restore.ToolOptions.General.Throughput, dbName, colName, restore.OutputOptions.StopOnError)
+	manager := cosmosdb.NewInsertionManager(ingestionChannel, cosmosDbCollection, restore.OutputOptions.StopOnError)
 	manager.SpecifySession = func() (*mgo.Session, error) {
 		return session.Copy(), nil
 	}
@@ -337,11 +339,125 @@ func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
 
 	s := session.Copy()
 	defer s.Close()
-	coll := collection.With(s)
+	coll := session.DB(dbName).C(colName)
 	if err = cosmosdb.VerifyDocumentCount(coll, uint64(documentCount)); err != nil {
 		return int64(0), err
 	}
 
+	if err = bsonSource.Err(); err != nil {
+		return int64(0), fmt.Errorf("reading bson input: %v", err)
+	}
+	return documentCount, termErr
+}
+
+// RestoreCollectionToDB pipes the given BSON data into the database.
+// Returns the number of documents restored and any errors that occured.
+func (restore *MongoRestore) RestoreCollectionToDB(dbName, colName string,
+	bsonSource *db.DecodedBSONSource, file PosReader, fileSize int64) (int64, error) {
+
+	var termErr error
+	session, err := restore.SessionProvider.GetSession()
+	if err != nil {
+		return int64(0), fmt.Errorf("error establishing connection: %v", err)
+	}
+	session.SetSafe(restore.safety)
+	defer session.Close()
+
+	collection := session.DB(dbName).C(colName)
+
+	documentCount := int64(0)
+	watchProgressor := progress.NewCounter(fileSize)
+	if restore.ProgressManager != nil {
+		name := fmt.Sprintf("%v.%v", dbName, colName)
+		restore.ProgressManager.Attach(name, watchProgressor)
+		defer restore.ProgressManager.Detach(name)
+	}
+
+	maxInsertWorkers := restore.OutputOptions.NumInsertionWorkers
+	if restore.OutputOptions.MaintainInsertionOrder {
+		maxInsertWorkers = 1
+	}
+
+	docChan := make(chan bson.Raw, insertBufferFactor)
+	resultChan := make(chan error, maxInsertWorkers)
+
+	// stream documents for this collection on docChan
+	go func() {
+		doc := bson.Raw{}
+		for bsonSource.Next(&doc) {
+			select {
+			case <-restore.termChan:
+				log.Logvf(log.Always, "terminating read on %v.%v", dbName, colName)
+				termErr = util.ErrTerminated
+				close(docChan)
+				return
+			default:
+				rawBytes := make([]byte, len(doc.Data))
+				copy(rawBytes, doc.Data)
+				docChan <- bson.Raw{Data: rawBytes}
+				documentCount++
+			}
+		}
+		close(docChan)
+	}()
+
+	log.Logvf(log.DebugLow, "using %v insertion workers", maxInsertWorkers)
+
+	for i := 0; i < maxInsertWorkers; i++ {
+		go func() {
+			// get a session copy for each insert worker
+			s := session.Copy()
+			defer s.Close()
+
+			coll := collection.With(s)
+			bulk := db.NewBufferedBulkInserter(
+				coll, restore.OutputOptions.BulkBufferSize, !restore.OutputOptions.StopOnError)
+			for rawDoc := range docChan {
+				if restore.objCheck {
+					err := bson.Unmarshal(rawDoc.Data, &bson.D{})
+					if err != nil {
+						resultChan <- fmt.Errorf("invalid object: %v", err)
+						return
+					}
+				}
+				if err := bulk.Insert(rawDoc); err != nil {
+					if db.IsConnectionError(err) || restore.OutputOptions.StopOnError {
+						// Propagate this error, since it's either a fatal connection error
+						// or the user has turned on --stopOnError
+						resultChan <- err
+					} else {
+						// Otherwise just log the error but don't propagate it.
+						log.Logvf(log.Always, "error: %v", err)
+					}
+				}
+				watchProgressor.Set(file.Pos())
+			}
+			err := bulk.Flush()
+			if err != nil {
+				if !db.IsConnectionError(err) && !restore.OutputOptions.StopOnError {
+					// Suppress this error since it's not a severe connection error and
+					// the user has not specified --stopOnError
+					log.Logvf(log.Always, "error: %v", err)
+					err = nil
+				}
+			}
+			resultChan <- err
+			return
+		}()
+
+		// sleep to prevent all threads from inserting at the same time at start
+		time.Sleep(time.Duration(i) * 10 * time.Millisecond)
+	}
+
+	// wait until all insert jobs finish
+	for done := 0; done < maxInsertWorkers; done++ {
+		err := <-resultChan
+		if err != nil {
+			return int64(0), fmt.Errorf("insertion error: %v", err)
+		}
+	}
+
+	// final error check
 	if err = bsonSource.Err(); err != nil {
 		return int64(0), fmt.Errorf("reading bson input: %v", err)
 	}

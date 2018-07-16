@@ -21,14 +21,14 @@ const (
 
 type InsertionWorker struct {
 	collection          *mgo.Collection
-	manager             *HiringManager
+	manager             *InsertionManager
 	ingestionChannel    chan interface{}
 	workerID            int
 	stopOnError         bool
 	OnDocumentIngestion func()
 }
 
-func NewInsertionWorker(collection *mgo.Collection, manager *HiringManager,
+func NewInsertionWorker(collection *mgo.Collection, manager *InsertionManager,
 	ingestionChannel chan interface{}, workerID int, stopOnError bool) *InsertionWorker {
 
 	return &InsertionWorker{
@@ -40,7 +40,7 @@ func NewInsertionWorker(collection *mgo.Collection, manager *HiringManager,
 	}
 }
 
-func (iw *InsertionWorker) Run(messageChannel <-chan HiringManagerMessage, backupChannel chan interface{}) error {
+func (iw *InsertionWorker) Run(messageChannel <-chan InsertionManagerMessage, backupChannel chan interface{}) error {
 	waitTime := 0
 	for {
 		time.Sleep(time.Duration(waitTime) * time.Millisecond)

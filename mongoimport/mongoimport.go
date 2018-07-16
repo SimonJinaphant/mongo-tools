@@ -8,6 +8,8 @@
 package mongoimport
 
 import (
+	"sync"
+
 	"github.com/globalsign/mgo"
 	"github.com/globalsign/mgo/bson"
 	"github.com/mongodb/mongo-tools/common/cosmosdb"
@@ -389,19 +391,17 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 		}
 	}
 
+	var cosmosDbCollection *cosmosdb.CosmosDBCollection
+
 	if strings.Contains(connURL, ".documents.azure.com") {
-		log.Logvf(log.Info, "We're targetting a Cosmos DB URI, let's create a custom collection")
+		log.Logvf(log.Info, "We're targetting an Azure Cosmos DB URI; creating a custom collection...")
 
-		collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
-		err := cosmosdb.CreateCustomCosmosDB(cosmosdb.CosmosDBCollectionInfo{
-			Throughput: imp.ToolOptions.General.Throughput,
-			ShardKey:   imp.ToolOptions.General.ShardKey,
-		}, collection)
-		collection.Database.Session.Close()
-
-		if err != nil {
-			log.Logvf(log.Always, "Unable to create collection: %s", collection.Name)
-			log.Logv(log.Always, "If the collection already exist please re-run the tool with `--drop` to delete the pre-existing collection")
+		cosmosDbCollection = cosmosdb.NewCollection(
+			session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection),
+			imp.ToolOptions.General.Throughput,
+			imp.ToolOptions.General.ShardKey,
+		)
+		if err := cosmosDbCollection.Deploy(); err != nil {
 			return 0, err
 		}
 	}
@@ -417,7 +417,11 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 
 	// insert documents into the target database
 	go func() {
-		processingErrChan <- imp.ingestDocuments(readDocs)
+		if strings.Contains(connURL, ".documents.azure.com") {
+			processingErrChan <- imp.ingestDocumentsIntoCosmosDB(readDocs, cosmosDbCollection)
+		} else {
+			processingErrChan <- imp.ingestDocuments(readDocs)
+		}
 	}()
 
 	e1 := channelQuorumError(processingErrChan, 2)
@@ -428,7 +432,7 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 // ingestDocuments accepts a channel from which it reads documents to be inserted
 // into the target collection. It spreads the insert/upsert workload across one
 // or more workers.
-func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) error {
+func (imp *MongoImport) ingestDocumentsIntoCosmosDB(readDocs chan bson.D, cosmosDbCollection *cosmosdb.CosmosDBCollection) error {
 	numInsertionWorkers := imp.IngestOptions.NumInsertionWorkers
 	log.Logvf(log.Info, "Assigning %d insertion workers", numInsertionWorkers)
 
@@ -441,8 +445,7 @@ func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) error {
 		close(ingestionChannel)
 	}()
 
-	manager := cosmosdb.NewHiringManager(ingestionChannel, numInsertionWorkers, imp.ToolOptions.General.Throughput,
-		imp.ToolOptions.DB, imp.ToolOptions.Collection, imp.IngestOptions.StopOnError)
+	manager := cosmosdb.NewInsertionManager(ingestionChannel, cosmosDbCollection, imp.IngestOptions.StopOnError)
 	manager.SpecifySession = func() (*mgo.Session, error) {
 		session, err := imp.SessionProvider.GetSession()
 		if err != nil {
@@ -471,6 +474,40 @@ func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) error {
 	return cosmosdb.GetDocumentCount(collection)
 }
 
+// ingestDocuments accepts a channel from which it reads documents to be inserted
+// into the target collection. It spreads the insert/upsert workload across one
+// or more workers.
+func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
+	numInsertionWorkers := imp.IngestOptions.NumInsertionWorkers
+	if numInsertionWorkers <= 0 {
+		numInsertionWorkers = 1
+	}
+
+	// Each ingest worker will return an error which will
+	// be set in the following cases:
+	//
+	// 1. There is a problem connecting with the server
+	// 2. The server becomes unreachable
+	// 3. There is an insertion/update error - e.g. duplicate key
+	//    error - and stopOnError is set to true
+
+	wg := new(sync.WaitGroup)
+	for i := 0; i < numInsertionWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// only set the first insertion error and cause sibling goroutines to terminate immediately
+			err := imp.runInsertionWorker(readDocs)
+			if err != nil && retErr == nil {
+				retErr = err
+				imp.Kill(err)
+			}
+		}()
+	}
+	wg.Wait()
+	return
+}
+
 // configureSession takes in a session and modifies it with properly configured
 // settings. It does the following configurations:
 //
@@ -495,6 +532,62 @@ func (imp *MongoImport) configureSession(session *mgo.Session) error {
 type flushInserter interface {
 	Insert(doc interface{}) error
 	Flush() error
+}
+
+// runInsertionWorker is a helper to InsertDocuments - it reads document off
+// the read channel and prepares then in batches for insertion into the databas
+func (imp *MongoImport) runInsertionWorker(readDocs chan bson.D) (err error) {
+	session, err := imp.SessionProvider.GetSession()
+	if err != nil {
+		return fmt.Errorf("error connecting to mongod: %v", err)
+	}
+	defer session.Close()
+	if err = imp.configureSession(session); err != nil {
+		return fmt.Errorf("error configuring session: %v", err)
+	}
+	collection := session.DB(imp.ToolOptions.DB).C(imp.ToolOptions.Collection)
+
+	var inserter flushInserter
+	if imp.IngestOptions.Mode == modeInsert {
+		inserter = db.NewBufferedBulkInserter(collection, imp.IngestOptions.BulkBufferSize, !imp.IngestOptions.StopOnError)
+		if !imp.IngestOptions.MaintainInsertionOrder {
+			inserter.(*db.BufferedBulkInserter).Unordered()
+		}
+	} else {
+		inserter = imp.newUpserter(collection)
+	}
+
+readLoop:
+	for {
+		select {
+		case document, alive := <-readDocs:
+			if !alive {
+				break readLoop
+			}
+			err = filterIngestError(imp.IngestOptions.StopOnError, inserter.Insert(document))
+			if err != nil {
+				return err
+			}
+			atomic.AddUint64(&imp.insertionCount, 1)
+		case <-imp.Dying():
+			return nil
+		}
+	}
+
+	err = inserter.Flush()
+	// TOOLS-349 correct import count for bulk operations
+	if bulkError, ok := err.(*mgo.BulkError); ok {
+		failedDocs := make(map[int]bool) // index of failures
+		for _, failure := range bulkError.Cases() {
+			failedDocs[failure.Index] = true
+		}
+		numFailures := len(failedDocs)
+		if numFailures > 0 {
+			log.Logvf(log.Always, "num failures: %d", numFailures)
+			atomic.AddUint64(&imp.insertionCount, ^uint64(numFailures-1))
+		}
+	}
+	return filterIngestError(imp.IngestOptions.StopOnError, err)
 }
 
 type upserter struct {
