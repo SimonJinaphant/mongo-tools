@@ -1,6 +1,7 @@
 package cosmosdb
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -10,14 +11,14 @@ import (
 
 const (
 	tooManyRequestTimeLimit = 5
-	exceededTimeLimit       = 30
-	awaitBetweenOpTime      = 500
+	serverOpTimeoutLimit    = 30
+	awaitBetweenOpTime      = 250
 )
 
 const (
-	TooManyRequests   = 16500
-	ExceededTimeLimit = 50
-	MalformedRequest  = 9
+	TooManyRequests  = 16500
+	ServerOpTimeout  = 50
+	MalformedRequest = 9
 )
 
 type InsertionWorker struct {
@@ -68,6 +69,10 @@ func (iw *InsertionWorker) Run(messageChannel <-chan InsertionManagerMessage, ba
 					log.Logvf(log.Always, "Worker %d inserted a backup that seem to have previously succeeded", iw.workerID)
 					continue
 				}
+				if strings.Contains(err.Error(), "ExceedInsertDeadline") {
+					backupChannel <- backupDoc
+					continue
+				}
 				log.Logvf(log.Always, "Worker %d failed to insert a backup document due to: %v", iw.workerID, err)
 				return err
 			}
@@ -101,22 +106,22 @@ func (iw *InsertionWorker) insert(doc interface{}) error {
 	// Prevent the retry from re-creating the insertOp object again by explicitly storing it
 	insertOperation := mgo.CreateInsertOp(iw.collection.FullName, doc)
 	TooManyRequestsDeadline := time.Now().Add(tooManyRequestTimeLimit * time.Second)
-	ExceededTimeLimitDeadline := time.Now().Add(exceededTimeLimit * time.Second)
+	ServerOpTimeoutDeadline := time.Now().Add(serverOpTimeoutLimit * time.Second)
 
 retry:
 	latency, err := iw.collection.InsertWithOp(insertOperation)
 	if err != nil {
 		if qerr, ok := err.(*mgo.QueryError); ok {
 			switch qerr.Code {
-			case ExceededTimeLimit:
+			case ServerOpTimeout:
 				log.Logv(log.Always, "Requests are exceeding time limit...let's take a 10 second break")
 				time.Sleep(10 * time.Second)
 
-				if time.Now().After(ExceededTimeLimitDeadline) {
-					log.Logvf(log.Always, "Maximum retries for `Exceeded Time Limit` exceeded %d seconds; moving on", exceededTimeLimit)
-				} else {
-					goto retry
+				if time.Now().After(ServerOpTimeoutDeadline) {
+					log.Logvf(log.Always, "Maximum retries for `Exceeded Time Limit` exceeded %d seconds; moving on", serverOpTimeoutLimit)
+					return fmt.Errorf("ExceedInsertDeadline-Timeout")
 				}
+				goto retry
 
 			case TooManyRequests:
 				iw.manager.NotifyRateLimit()
@@ -124,9 +129,9 @@ retry:
 
 				if time.Now().After(TooManyRequestsDeadline) {
 					log.Logvf(log.Always, "Maximum retries for `Throughput` exceeded %d seconds; moving on", tooManyRequestTimeLimit)
-				} else {
-					goto retry
+					return fmt.Errorf("ExceedInsertDeadline-Throughput")
 				}
+				goto retry
 
 			case MalformedRequest:
 				log.Logv(log.Always, "The request sent was malformed")

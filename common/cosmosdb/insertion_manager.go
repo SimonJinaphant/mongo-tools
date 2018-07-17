@@ -13,9 +13,10 @@ import (
 type InsertionManagerMessage int
 
 const (
-	MsgSlowdown      InsertionManagerMessage = 1
-	MsgSpeedup       InsertionManagerMessage = 2
-	backupBufferSize                         = 1000
+	MsgSlowdown        InsertionManagerMessage = 1
+	MsgSpeedup         InsertionManagerMessage = 2
+	backupBufferSize                           = 1000
+	messageChannelSize                         = 100
 )
 
 type InsertionManager struct {
@@ -97,12 +98,16 @@ func (h *InsertionManager) Notify(workerId int, latency int64, charge int64) {
 }
 
 // Start launches the manager routine which periodically checks whether it can add new workers to speed up the ingestion task
-func (h *InsertionManager) Start(n int, disableWorkerScaling bool) {
+func (h *InsertionManager) Start(startingAmount int, disableWorkerScaling bool) {
 	if h.SpecifySession == nil {
 		log.Logv(log.Always, "Unable to start manager with no session defined")
 		return
 	}
-	for i := 0; i < n; i++ {
+	if startingAmount < 1 {
+		log.Logv(log.Always, "Unable to start manager with a worker count less than 1")
+		return
+	}
+	for i := 0; i < startingAmount; i++ {
 		h.HireNewWorker()
 	}
 	if disableWorkerScaling {
@@ -135,7 +140,7 @@ func (h *InsertionManager) Start(n int, disableWorkerScaling bool) {
 			amount := int(math.Ceil((float64(h.collection.Throughput) * float64(averageLatency) / 1000000.0) / float64(averageCharge)))
 			amountToHire := (amount - h.workerCount) / 2
 			log.Logvf(log.Info, "Manager wants a total of workers %d; thus an additional %d workers will be hired", amount, amountToHire)
-			if amountToHire <= 0 || amountToHire > 100 || h.CurrentRateLimitCount() > 0 {
+			if amountToHire <= 0 || amountToHire > 100 || h.CurrentRateLimitCount() > 0 || h.slowDownCount > 0 {
 				break
 			}
 
@@ -154,10 +159,9 @@ func (h *InsertionManager) Start(n int, disableWorkerScaling bool) {
 
 			if rateLimitCount := h.CurrentRateLimitCount(); rateLimitCount > 0 {
 				log.Logvf(log.Info, "There was %d `Request rate too large` responses, no extra workers are needed", rateLimitCount)
-				rateLimitThreshold := uint64(h.workerCount * 5)
 
-				if rateLimitCount > rateLimitThreshold {
-					for i := uint64(0); i < rateLimitCount/rateLimitThreshold; i++ {
+				if rateLimitCount > 0 {
+					for i := uint64(0); i < uint64(math.Ceil(float64(rateLimitCount)/2.0)); i++ {
 						h.slowdownWorker()
 					}
 				}
@@ -195,7 +199,7 @@ func (h *InsertionManager) HireNewWorker() {
 	h.latencyRecords = append(h.latencyRecords, 0)
 	h.consumptionRecords = append(h.consumptionRecords, 0)
 	h.managerChannels = append(h.managerChannels, nil)
-	h.managerChannels[newWorkerID] = make(chan InsertionManagerMessage, 10)
+	h.managerChannels[newWorkerID] = make(chan InsertionManagerMessage, messageChannelSize)
 
 	h.workerWg.Add(1)
 	h.workerCount++
