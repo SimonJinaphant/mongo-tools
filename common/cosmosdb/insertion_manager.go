@@ -13,10 +13,16 @@ import (
 type InsertionManagerMessage int
 
 const (
-	MsgSlowdown        InsertionManagerMessage = 1
-	MsgSpeedup         InsertionManagerMessage = 2
-	backupBufferSize                           = 1000
-	messageChannelSize                         = 100
+	MsgSlowdown InsertionManagerMessage = 1
+	MsgSpeedup  InsertionManagerMessage = 2
+)
+
+const (
+	backupBufferSize          = 1000
+	messageChannelSize        = 100
+	estimateWorkerScaleFactor = 1.45
+	massHiringPercentage      = 0.8
+	massHiringMaxWorker       = 150
 )
 
 type InsertionManager struct {
@@ -133,14 +139,14 @@ func (h *InsertionManager) Start(startingAmount int, disableWorkerScaling bool) 
 				latencySum += atomic.LoadInt64(&h.latencyRecords[i])
 				chargeSum += atomic.LoadInt64(&h.consumptionRecords[i])
 			}
-			averageLatency := latencySum / int64(h.workerCount)
-			averageCharge := chargeSum / int64(h.workerCount)
-			log.Logvf(log.Info, "On average, insertions took %d (ns) and consumed %d RU", averageLatency, averageCharge)
+			averageLatency := float64(latencySum) / float64(h.workerCount)
+			averageCharge := float64(chargeSum) / float64(h.workerCount)
+			log.Logvf(log.Info, "On average, insertions took %.2f nanoseconds and consumed %.2f RU", averageLatency, averageCharge)
 
-			amount := int(math.Ceil((float64(h.collection.Throughput) * float64(averageLatency) / 1000000.0) / float64(averageCharge)))
-			amountToHire := (amount - h.workerCount) / 2
+			amount := int(math.Ceil((float64(h.collection.Throughput)*averageLatency/1.0e+6)/averageCharge) * estimateWorkerScaleFactor)
+			amountToHire := int(math.Ceil(float64(amount-h.workerCount) * massHiringPercentage))
 			log.Logvf(log.Info, "Manager wants a total of workers %d; thus an additional %d workers will be hired", amount, amountToHire)
-			if amountToHire <= 0 || amountToHire > 100 || h.CurrentRateLimitCount() > 0 || h.slowDownCount > 0 {
+			if amountToHire <= 0 || amountToHire > massHiringMaxWorker || h.CurrentRateLimitCount() > 0 || h.slowDownCount > 0 {
 				break
 			}
 
