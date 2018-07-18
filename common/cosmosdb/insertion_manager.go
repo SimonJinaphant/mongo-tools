@@ -6,64 +6,89 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/globalsign/mgo"
 	"github.com/mongodb/mongo-tools/common/log"
 )
 
-type HiringManagerMessage int
+type InsertionManagerMessage int
 
 const (
-	MsgSlowdown HiringManagerMessage = 1
-	MsgSpeedup  HiringManagerMessage = 2
+	MsgSlowdown        InsertionManagerMessage = 1
+	MsgSpeedup         InsertionManagerMessage = 2
+	backupBufferSize                           = 1000
+	messageChannelSize                         = 100
 )
 
-type HiringManager struct {
+type InsertionManager struct {
 	latencyRecords     []int64
 	consumptionRecords []int64
+	recordWg           *sync.WaitGroup
 
+	workerCount int
+	workerWg    *sync.WaitGroup
+
+	collection *CosmosDBCollection
+
+	managerChannels  []chan InsertionManagerMessage
 	rateLimitCounter uint64
-	workerCount      int
-	throughput       int
+	slowDownCount    int
 
-	workerWg *sync.WaitGroup
-	recordWg *sync.WaitGroup
+	backupChannel chan interface{}
 
-	ManagerChannels []chan HiringManagerMessage
-	slowDownCount   int
+	OnDocumentIngestion func()
+	SpecifySession      func() (*mgo.Session, error)
 
-	AddWorkerAction func(manager *HiringManager, workerId int) error
+	stopOnError      bool
+	ingestionChannel chan interface{}
 }
 
-func NewHiringManager(defaultWorkers int, throughput int) *HiringManager {
-	return &HiringManager{
-		latencyRecords:     make([]int64, 0, defaultWorkers),
-		consumptionRecords: make([]int64, 0, defaultWorkers),
-		rateLimitCounter:   0,
-		workerCount:        0,
-		throughput:         throughput,
-		workerWg:           new(sync.WaitGroup),
+func NewInsertionManager(ingestionChannel chan interface{}, collection *CosmosDBCollection, stopOnError bool) *InsertionManager {
+	return &InsertionManager{
+		latencyRecords:     make([]int64, 0, 0),
+		consumptionRecords: make([]int64, 0, 0),
 		recordWg:           new(sync.WaitGroup),
-		ManagerChannels:    make([]chan HiringManagerMessage, defaultWorkers),
-		slowDownCount:      0,
-		AddWorkerAction:    nil,
+
+		workerCount: 0,
+		workerWg:    new(sync.WaitGroup),
+
+		collection: collection,
+
+		managerChannels:  make([]chan InsertionManagerMessage, 0),
+		rateLimitCounter: 0,
+		slowDownCount:    0,
+
+		backupChannel: make(chan interface{}, backupBufferSize),
+
+		OnDocumentIngestion: nil,
+		SpecifySession:      nil,
+
+		stopOnError:      stopOnError,
+		ingestionChannel: ingestionChannel,
 	}
 }
 
-func (h *HiringManager) AwaitAllWorkers() {
+func (h *InsertionManager) AwaitAllWorkers() {
 	h.workerWg.Wait()
 	log.Logv(log.Info, "All workers have finished")
+
+	close(h.backupChannel)
+	if len(h.backupChannel) != 0 {
+		// TODO: Figure out what to do here... So far this part never seems to get invoke
+		log.Logvf(log.Always, "%d document(s) previously failed to be restored.", len(h.backupChannel))
+	}
 }
 
-func (h *HiringManager) CountWorkers() int {
+func (h *InsertionManager) CountWorkers() int {
 	return h.workerCount
 }
 
 // CanNotify is invoked from the workers to check if it's allowed to notify new information
-func (h *HiringManager) CanNotify(workerId int) bool {
+func (h *InsertionManager) CanNotify(workerId int) bool {
 	return atomic.LoadInt64(&h.latencyRecords[workerId]) == -1
 }
 
 // Notify is invoked from the workers to provide the manager with information it needs to calculate whether we can go faster or not
-func (h *HiringManager) Notify(workerId int, latency int64, charge int64) {
+func (h *InsertionManager) Notify(workerId int, latency int64, charge int64) {
 	if latency < 0 {
 		return
 	}
@@ -73,12 +98,16 @@ func (h *HiringManager) Notify(workerId int, latency int64, charge int64) {
 }
 
 // Start launches the manager routine which periodically checks whether it can add new workers to speed up the ingestion task
-func (h *HiringManager) Start(n int, disableWorkerScaling bool) {
-	if h.AddWorkerAction == nil {
-		log.Logv(log.Always, "Unable to start manager with no AddWorkerAction defined")
+func (h *InsertionManager) Start(startingAmount int, disableWorkerScaling bool) {
+	if h.SpecifySession == nil {
+		log.Logv(log.Always, "Unable to start manager with no session defined")
 		return
 	}
-	for i := 0; i < n; i++ {
+	if startingAmount < 1 {
+		log.Logv(log.Always, "Unable to start manager with a worker count less than 1")
+		return
+	}
+	for i := 0; i < startingAmount; i++ {
 		h.HireNewWorker()
 	}
 	if disableWorkerScaling {
@@ -108,10 +137,10 @@ func (h *HiringManager) Start(n int, disableWorkerScaling bool) {
 			averageCharge := chargeSum / int64(h.workerCount)
 			log.Logvf(log.Info, "On average, insertions took %d (ns) and consumed %d RU", averageLatency, averageCharge)
 
-			amount := int(math.Ceil((float64(h.throughput) * float64(averageLatency) / 1000000.0) / float64(averageCharge)))
+			amount := int(math.Ceil((float64(h.collection.Throughput) * float64(averageLatency) / 1000000.0) / float64(averageCharge)))
 			amountToHire := (amount - h.workerCount) / 2
 			log.Logvf(log.Info, "Manager wants a total of workers %d; thus an additional %d workers will be hired", amount, amountToHire)
-			if amountToHire <= 0 || amountToHire > 100 || h.CurrentRateLimitCount() > 0 {
+			if amountToHire <= 0 || amountToHire > 100 || h.CurrentRateLimitCount() > 0 || h.slowDownCount > 0 {
 				break
 			}
 
@@ -130,10 +159,9 @@ func (h *HiringManager) Start(n int, disableWorkerScaling bool) {
 
 			if rateLimitCount := h.CurrentRateLimitCount(); rateLimitCount > 0 {
 				log.Logvf(log.Info, "There was %d `Request rate too large` responses, no extra workers are needed", rateLimitCount)
-				rateLimitThreshold := uint64(h.workerCount * 5)
 
-				if rateLimitCount > rateLimitThreshold {
-					for i := uint64(0); i < rateLimitCount/rateLimitThreshold; i++ {
+				if rateLimitCount > 0 {
+					for i := uint64(0); i < uint64(math.Ceil(float64(rateLimitCount)/2.0)); i++ {
 						h.slowdownWorker()
 					}
 				}
@@ -156,47 +184,57 @@ func (h *HiringManager) Start(n int, disableWorkerScaling bool) {
 }
 
 // HireNewWorker launches a new parallel worker to help with the ingestion work
-func (h *HiringManager) HireNewWorker() {
-	h.latencyRecords = append(h.latencyRecords, 0)
-	h.consumptionRecords = append(h.consumptionRecords, 0)
+func (h *InsertionManager) HireNewWorker() {
+	session, err := h.SpecifySession()
+	if err != nil {
+		log.Logvf(log.Always, "Unable to obtain session for new worker: %v", err)
+		return
+	}
+	collection := session.DB(h.collection.Collection.Database.Name).C(h.collection.Collection.Name)
 
 	newWorkerID := h.workerCount
-	h.ManagerChannels = append(h.ManagerChannels, nil)
-	h.ManagerChannels[newWorkerID] = make(chan HiringManagerMessage, 10)
+	worker := NewInsertionWorker(collection, h, h.ingestionChannel, newWorkerID, h.stopOnError)
+	worker.OnDocumentIngestion = h.OnDocumentIngestion
 
-	h.workerCount++
+	h.latencyRecords = append(h.latencyRecords, 0)
+	h.consumptionRecords = append(h.consumptionRecords, 0)
+	h.managerChannels = append(h.managerChannels, nil)
+	h.managerChannels[newWorkerID] = make(chan InsertionManagerMessage, messageChannelSize)
 
 	h.workerWg.Add(1)
+	h.workerCount++
+
 	go func() {
+		defer session.Close()
 		defer h.workerWg.Done()
-		if err := h.AddWorkerAction(h, newWorkerID); err != nil {
+		if err := worker.Run(h.managerChannels[newWorkerID], h.backupChannel); err != nil {
 			log.Logvf(log.Always, "Worker %d exiting due to an error: %v", newWorkerID, err)
 		}
 	}()
 }
 
 //NotifyRateLimit is to be invoked from worker to notify the manager to stop adding new workers
-func (h *HiringManager) NotifyRateLimit() {
+func (h *InsertionManager) NotifyRateLimit() {
 	atomic.AddUint64(&h.rateLimitCounter, 1)
 }
 
 // CurrentRateLimitCount is invoked from the manager to check if a worker has reported a RateLimit error since the last time it checked.
-func (h *HiringManager) CurrentRateLimitCount() uint64 {
+func (h *InsertionManager) CurrentRateLimitCount() uint64 {
 	limitCount := atomic.LoadUint64(&h.rateLimitCounter)
 	atomic.StoreUint64(&h.rateLimitCounter, 0)
 	return limitCount
 }
 
-func (h *HiringManager) slowdownWorker() {
+func (h *InsertionManager) slowdownWorker() {
 	targetWorker := h.slowDownCount
 	if targetWorker >= h.workerCount {
 		targetWorker = targetWorker % h.workerCount
 	}
-	h.ManagerChannels[targetWorker] <- MsgSlowdown
+	h.managerChannels[targetWorker] <- MsgSlowdown
 	h.slowDownCount++
 }
 
-func (h *HiringManager) speedupWorker() {
+func (h *InsertionManager) speedupWorker() {
 	if h.slowDownCount <= 0 {
 		log.Logv(log.Info, "All workers are already running as fast as possible")
 		return
@@ -207,6 +245,6 @@ func (h *HiringManager) speedupWorker() {
 		targetWorker = targetWorker % h.workerCount
 	}
 
-	h.ManagerChannels[targetWorker] <- MsgSpeedup
+	h.managerChannels[targetWorker] <- MsgSpeedup
 	h.slowDownCount--
 }
