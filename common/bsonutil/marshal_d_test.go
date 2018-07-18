@@ -9,7 +9,7 @@ package bsonutil
 import (
 	"encoding/json"
 	. "github.com/smartystreets/goconvey/convey"
-	"gopkg.in/mgo.v2/bson"
+	"github.com/globalsign/mgo/bson"
 	"strings"
 	"testing"
 )
