@@ -9,7 +9,7 @@ package db
 import (
 	"bytes"
 	. "github.com/smartystreets/goconvey/convey"
-	"gopkg.in/mgo.v2/bson"
+	"github.com/globalsign/mgo/bson"
 	"io/ioutil"
 	"testing"
 )

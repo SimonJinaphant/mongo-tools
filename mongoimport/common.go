@@ -248,7 +248,8 @@ func filterIngestError(stopOnError bool, err error) error {
 	if stopOnError || db.IsConnectionError(err) {
 		return err
 	}
-	return err
+	log.Logvf(log.Always, "error inserting documents: %v", err)
+	return nil
 }
 
 // removeBlankFields takes document and returns a new copy in which
