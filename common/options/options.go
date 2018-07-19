@@ -104,6 +104,7 @@ type General struct {
 
 	IgnoreSizeWarning    bool `long:"ignoreSizeWarning" default:"false" description:"Disable the size warning when importing into Azure Cosmos DB"`
 	DisableWorkerScaling bool `long:"disableWorkerScaling" default:"false" description:"Disable the scaling of Insertion workers"`
+	RunStockTool bool `long:"runStockTool" default:"false" description:"Run this tool without any Azure Cosmos DB modifications"`
 }
 
 // Struct holding verbosity-related options

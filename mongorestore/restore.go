@@ -89,7 +89,7 @@ func (restore *MongoRestore) RestoreIntents() error {
 
 // RestoreIntent attempts to restore a given intent into MongoDB.
 func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
-	if strings.Contains(restore.ToolOptions.Host, ".documents.azure.com") {
+	if !restore.ToolOptions.RunStockTool {
 		if err := cosmosdb.ValidateSizeRequirement(restore.ToolOptions.General.ShardKey, intent.Size, restore.ToolOptions.General.IgnoreSizeWarning); err != nil {
 			return err
 		}
@@ -114,7 +114,7 @@ func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
 				if err != nil {
 					return err // no context needed
 				}
-				if strings.Contains(restore.ToolOptions.Host, ".documents.azure.com") {
+				if !restore.ToolOptions.RunStockTool {
 					log.Logv(log.Always, "The Cosmos DB collection was dropped!, let's give Cosmos DB 5 seconds to clear out its cache")
 					time.Sleep(5 * time.Second)
 				}
@@ -206,7 +206,7 @@ func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
 	if !collectionExists {
 		log.Logvf(log.Info, "creating collection %v %s", intent.Namespace(), logMessageSuffix)
 		log.Logvf(log.DebugHigh, "using collection options: %#v", options)
-		if strings.Contains(restore.ToolOptions.Host, ".documents.azure.com") {
+		if !restore.ToolOptions.RunStockTool {
 			log.Logvf(log.Info, "We're targetting an Azure Cosmos DB URI; creating a custom collection...")
 			session, serr := restore.SessionProvider.GetSession()
 			if serr != nil {
@@ -243,7 +243,7 @@ func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
 
 		bsonSource := db.NewDecodedBSONSource(db.NewBSONSource(intent.BSONFile))
 		defer bsonSource.Close()
-		if strings.Contains(restore.ToolOptions.Host, ".documents.azure.com") {
+		if !restore.ToolOptions.RunStockTool {
 			documentCount, err = restore.RestoreCollectionToCosmosDB(cosmosDbCollection, bsonSource, intent.BSONFile, intent.Size)
 		} else {
 			documentCount, err = restore.RestoreCollectionToDB(intent.DB, intent.C, bsonSource, intent.BSONFile, intent.Size)

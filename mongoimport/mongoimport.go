@@ -309,7 +309,7 @@ func (imp *MongoImport) ImportDocuments() (uint64, error) {
 	}
 	defer source.Close()
 
-	if strings.Contains(imp.ToolOptions.Host, ".documents.azure.com") {
+	if !imp.ToolOptions.RunStockTool {
 		if err := cosmosdb.ValidateSizeRequirement(imp.ToolOptions.General.ShardKey, fileSize, imp.ToolOptions.General.IgnoreSizeWarning); err != nil {
 			return 0, err
 		}
@@ -393,7 +393,7 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 
 	var cosmosDbCollection *cosmosdb.CosmosDBCollection
 
-	if strings.Contains(connURL, ".documents.azure.com") {
+	if !imp.ToolOptions.RunStockTool {
 		log.Logvf(log.Info, "We're targetting an Azure Cosmos DB URI; creating a custom collection...")
 
 		cosmosDbCollection = cosmosdb.NewCollection(
@@ -417,7 +417,7 @@ func (imp *MongoImport) importDocuments(inputReader InputReader) (numImported ui
 
 	// insert documents into the target database
 	go func() {
-		if strings.Contains(connURL, ".documents.azure.com") {
+		if !imp.ToolOptions.RunStockTool {
 			processingErrChan <- imp.ingestDocumentsIntoCosmosDB(readDocs, cosmosDbCollection)
 		} else {
 			processingErrChan <- imp.ingestDocuments(readDocs)
