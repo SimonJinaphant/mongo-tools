@@ -1,6 +1,8 @@
 package cosmosdb
 
 import (
+	"fmt"
+
 	"github.com/globalsign/mgo"
 	"github.com/globalsign/mgo/bson"
 	"github.com/mongodb/mongo-tools/common/log"
@@ -13,6 +15,11 @@ const (
 	shardkeyMessage = `
 	Re-run this tool with the parameters --shardKey <key>, where <key> is a valid Mongo DB Shard Key.
 	For more information about Shard Key visit: https://docs.mongodb.com/manual/sharding/#shard-keys.`
+
+	throughputMessage = `
+	To ingest into Azure Cosmos DB you must specify a throughput via re-running the tool with --throughput <int>
+	If you specified a Shard Key you can use a throughput value between 10,000 to 50,000;
+	otherwise you can only use a value between 1 to 10,000.`
 )
 
 // The CosmosDBCollection type holds metadata about a CosmosDB collection.
@@ -35,10 +42,13 @@ func (c *CosmosDBCollection) Deploy() error {
 	cmd = append(cmd, bson.DocElem{"customAction", "CreateCollection"})
 	cmd = append(cmd, bson.DocElem{"collection", c.Collection.Name})
 
-	//TODO: Validate the throughput range for Fixed & Unlimited collections
-	cmd = append(cmd, bson.DocElem{"offerThroughput", c.Throughput})
+	throughput := c.Throughput
+	if throughput <= 0 {
+		log.Logv(log.Always, throughputMessage)
+		return fmt.Errorf("No valid throughput provided")
+	}
+	cmd = append(cmd, bson.DocElem{"offerThroughput", throughput})
 
-	//TODO: Validate the shardkey to be in an acceptable format
 	if c.ShardKey != "" {
 		cmd = append(cmd, bson.DocElem{"shardKey", c.ShardKey})
 	}
