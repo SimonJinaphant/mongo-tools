@@ -1,6 +1,7 @@
 package cosmosdb
 
 import (
+	"fmt"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -75,6 +76,7 @@ func NewInsertionManager(ingestionChannel chan interface{}, collection *CosmosDB
 	}
 }
 
+// AwaitAllWorkers blocks until all workers have exited
 func (h *InsertionManager) AwaitAllWorkers() {
 	h.workerWg.Wait()
 	log.Logv(log.Info, "All workers have finished")
@@ -86,11 +88,12 @@ func (h *InsertionManager) AwaitAllWorkers() {
 	}
 }
 
+// CountWorkers gives the current amount of workers hired
 func (h *InsertionManager) CountWorkers() int {
 	return h.workerCount
 }
 
-//NotifyRateLimit is to be invoked from worker to notify the manager to stop adding new workers
+//NotifyRateLimit is to be invoked from a worker to notify the manager to stop adding new workers
 func (h *InsertionManager) NotifyRateLimit() {
 	atomic.AddUint64(&h.rateLimitCounter, 1)
 }
@@ -187,15 +190,16 @@ func (h *InsertionManager) launchMassHiringManager() {
 
 		medianLatency := medianFloat64(sampleLatencyData)
 		meanCharge := meanFloat64(sampleChargeData)
-		log.Logvf(log.Info, "Median Insertions every second took %.8f seconds and consumed %.2f RU", medianLatency, meanCharge)
+		log.Logvf(log.Info, "Median insertion every second took %.8f seconds and consumed %.2f RU", medianLatency, meanCharge)
 
 		amount := int(math.Ceil((float64(h.collection.Throughput)*medianLatency)/meanCharge) * estimateWorkerScaleFactor)
 		amountToHire := int(math.Ceil(float64(amount-h.workerCount) * massHiringPercentage))
-		log.Logvf(log.Info, "Manager wants a total of workers %d; thus an additional %d workers will be hired", amount, amountToHire)
-		if amountToHire <= 0 || amountToHire > massHiringMaxWorkerPerHire || h.CurrentRateLimitCount() > 0 || h.slowDownCount > 0 {
-			break
-		}
+		log.Logvf(log.Info, "Manager wants a total of workers %d and thus requests %d additional worker(s) to be hired.", amount, amountToHire)
 
+		if result := h.filterMassHiringChoices(amountToHire); result != nil {
+			log.Logv(log.Info, "Manager failed to mass hire new workers because: "+result.Error())
+			return
+		}
 		for i := 0; i < amountToHire; i++ {
 			h.HireNewWorker()
 		}
@@ -212,7 +216,7 @@ func (h *InsertionManager) launchSingleHiringManager() {
 
 			if rateLimitCount > 0 {
 				for i := uint64(0); i < uint64(math.Ceil(float64(rateLimitCount)/2.0)); i++ {
-					h.slowdownWorker()
+					h.signalSlowdown()
 				}
 			}
 			time.Sleep(5 * time.Second)
@@ -221,7 +225,7 @@ func (h *InsertionManager) launchSingleHiringManager() {
 		}
 
 		if h.slowDownCount > 0 {
-			h.speedupWorker()
+			h.signalSpeedup()
 			log.Logv(log.Info, "Manager thinks we can move a bit faster; a worker can speed back up again")
 		} else {
 			h.HireNewWorker()
@@ -232,7 +236,7 @@ func (h *InsertionManager) launchSingleHiringManager() {
 	}
 }
 
-func (h *InsertionManager) slowdownWorker() {
+func (h *InsertionManager) signalSlowdown() {
 	targetWorker := h.slowDownCount
 	if targetWorker >= h.workerCount {
 		targetWorker = targetWorker % h.workerCount
@@ -241,7 +245,7 @@ func (h *InsertionManager) slowdownWorker() {
 	h.slowDownCount++
 }
 
-func (h *InsertionManager) speedupWorker() {
+func (h *InsertionManager) signalSpeedup() {
 	if h.slowDownCount <= 0 {
 		log.Logv(log.Info, "All workers are already running as fast as possible")
 		return
@@ -254,4 +258,17 @@ func (h *InsertionManager) speedupWorker() {
 
 	h.managerChannels[targetWorker] <- MsgSpeedup
 	h.slowDownCount--
+}
+
+func (h *InsertionManager) filterMassHiringChoices(amountToHire int) error {
+	if amountToHire <= 0 {
+		return fmt.Errorf("manager has an overflow of workers")
+	}
+	if amountToHire > massHiringMaxWorkerPerHire {
+		return fmt.Errorf("manager attempted to hire too many workers")
+	}
+	if h.CurrentRateLimitCount() > 0 || h.slowDownCount > 0 {
+		return fmt.Errorf("manager was recently throttled")
+	}
+	return nil
 }
