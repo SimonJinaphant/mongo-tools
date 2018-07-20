@@ -160,9 +160,11 @@ func (h *InsertionManager) Start(startingAmount int, disableWorkerScaling bool) 
 		return
 	}
 
-	go h.launchMassHiringManager()
-	log.Logv(log.Info, "Hiring manager has stopped mass hiring; switching to single hires")
-	go h.launchSingleHiringManager()
+	go func() {
+		h.launchMassHiringManager()
+		log.Logv(log.Info, "Mass hiring of workers is over; switching to single hires")
+		h.launchSingleHiringManager()
+	}()
 }
 
 func (h *InsertionManager) launchMassHiringManager() {
