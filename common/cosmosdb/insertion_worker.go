@@ -26,6 +26,7 @@ type InsertionWorker struct {
 	ingestionChannel    chan interface{}
 	workerID            int
 	stopOnError         bool
+	shouldSample        bool
 	OnDocumentIngestion func()
 }
 
@@ -38,6 +39,7 @@ func NewInsertionWorker(collection *mgo.Collection, manager *InsertionManager,
 		ingestionChannel: ingestionChannel,
 		workerID:         workerID,
 		stopOnError:      stopOnError,
+		shouldSample:     false,
 	}
 }
 
@@ -54,6 +56,8 @@ func (iw *InsertionWorker) Run(messageChannel <-chan InsertionManagerMessage, ba
 			case MsgSpeedup:
 				waitTime -= awaitBetweenOpTime
 				log.Logvf(log.Info, "Worker %d was told to speed back up; it will now await %d ms between operations", iw.workerID, waitTime)
+			case MsgRequestSample:
+				iw.shouldSample = true
 			default:
 				log.Logvf(log.Info, "Worker %d got an unknown message from manager", iw.workerID)
 			}
@@ -133,12 +137,13 @@ retry:
 			}
 		}
 	} else {
-		if iw.manager.CanNotify(iw.workerID) {
+		if iw.shouldSample {
 			insertCharge, err := iw.collection.GetLastRequestStatistics()
 			if err != nil {
 				log.Logv(log.Info, "Unable to get RU cost from last operation")
 			}
-			iw.manager.Notify(iw.workerID, latency, insertCharge)
+			iw.manager.SubmitSample(iw.workerID, latency, insertCharge)
+			iw.shouldSample = false
 		}
 	}
 	return err

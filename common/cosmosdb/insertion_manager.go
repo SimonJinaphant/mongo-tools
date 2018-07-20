@@ -13,21 +13,22 @@ import (
 type InsertionManagerMessage int
 
 const (
-	MsgSlowdown InsertionManagerMessage = 1
-	MsgSpeedup  InsertionManagerMessage = 2
+	MsgSlowdown      InsertionManagerMessage = 1
+	MsgSpeedup       InsertionManagerMessage = 2
+	MsgRequestSample InsertionManagerMessage = 3
 )
 
 const (
-	backupBufferSize          = 1000
-	messageChannelSize        = 100
-	estimateWorkerScaleFactor = 1.45
-	massHiringPercentage      = 0.8
-	massHiringMaxWorker       = 150
-	massHiringSampleSize      = 5
+	backupBufferSize           = 1000
+	messageChannelSize         = 100
+	estimateWorkerScaleFactor  = 1.45
+	massHiringPercentage       = 0.8
+	massHiringMaxWorkerPerHire = 200
+	massHiringSampleSize       = 5
 )
 
 type InsertionManager struct {
-	latencyRecords     []int64
+	latencyRecords     []float64
 	consumptionRecords []int64
 	recordWg           *sync.WaitGroup
 
@@ -51,7 +52,7 @@ type InsertionManager struct {
 
 func NewInsertionManager(ingestionChannel chan interface{}, collection *CosmosDBCollection, stopOnError bool) *InsertionManager {
 	return &InsertionManager{
-		latencyRecords:     make([]int64, 0, 0),
+		latencyRecords:     make([]float64, 0, 0),
 		consumptionRecords: make([]int64, 0, 0),
 		recordWg:           new(sync.WaitGroup),
 
@@ -89,109 +90,29 @@ func (h *InsertionManager) CountWorkers() int {
 	return h.workerCount
 }
 
-// CanNotify is invoked from the workers to check if it's allowed to notify new information
-func (h *InsertionManager) CanNotify(workerId int) bool {
-	return atomic.LoadInt64(&h.latencyRecords[workerId]) == -1
+//NotifyRateLimit is to be invoked from worker to notify the manager to stop adding new workers
+func (h *InsertionManager) NotifyRateLimit() {
+	atomic.AddUint64(&h.rateLimitCounter, 1)
 }
 
-// Notify is invoked from the workers to provide the manager with information it needs to calculate whether we can go faster or not
-func (h *InsertionManager) Notify(workerId int, latency int64, charge int64) {
+// CurrentRateLimitCount is invoked from the manager to check if a worker has reported a RateLimit error since the last time it checked.
+func (h *InsertionManager) CurrentRateLimitCount() uint64 {
+	limitCount := atomic.LoadUint64(&h.rateLimitCounter)
+	atomic.StoreUint64(&h.rateLimitCounter, 0)
+	return limitCount
+}
+
+// SubmitSample is invoked from the workers to provide the manager with information it needs to calculate whether we can go faster or not
+func (h *InsertionManager) SubmitSample(workerId int, latency int64, charge int64) {
 	if latency < 0 {
 		return
 	}
 	defer h.recordWg.Done()
-	atomic.StoreInt64(&h.latencyRecords[workerId], latency)
-	atomic.StoreInt64(&h.consumptionRecords[workerId], charge)
+	h.latencyRecords[workerId] = float64(latency) / 1.0e+6
+	h.consumptionRecords[workerId] = charge
 }
 
-// Start launches the manager routine which periodically checks whether it can add new workers to speed up the ingestion task
-func (h *InsertionManager) Start(startingAmount int, disableWorkerScaling bool) {
-	if h.SpecifySession == nil {
-		log.Logv(log.Always, "Unable to start manager with no session defined")
-		return
-	}
-	if startingAmount < 1 {
-		log.Logv(log.Always, "Unable to start manager with a worker count less than 1")
-		return
-	}
-	for i := 0; i < startingAmount; i++ {
-		h.HireNewWorker()
-	}
-	if disableWorkerScaling {
-		log.Logv(log.Always, "Auto Scaling of Insertion Workers is disabled in this run")
-		return
-	}
-	go func() {
-		for {
-			sampleLatencyData := make([]float64, massHiringSampleSize)
-			sampleChargeData := make([]float64, massHiringSampleSize)
-
-			for i := 0; i < massHiringSampleSize; i++ {
-				h.recordWg.Add(h.workerCount)
-				for i := 0; i < h.workerCount; i++ {
-					atomic.StoreInt64(&h.latencyRecords[i], -1)
-					atomic.StoreInt64(&h.consumptionRecords[i], -1)
-				}
-				h.recordWg.Wait()
-
-				averageSampleLatency := meanInt64(h.latencyRecords)
-				averageSampleCharge := meanInt64(h.consumptionRecords)
-
-				sampleLatencyData[i] = averageSampleLatency
-				sampleChargeData[i] = averageSampleCharge
-				time.Sleep(time.Second)
-			}
-
-			averageLatency := medianFloat64(sampleLatencyData)
-			averageCharge := medianFloat64(sampleChargeData)
-			log.Logvf(log.Info, "Median Insertions every second took %.2f nanoseconds and consumed %.2f RU", averageLatency, averageCharge)
-
-			amount := int(math.Ceil((float64(h.collection.Throughput)*averageLatency/1.0e+6)/averageCharge) * estimateWorkerScaleFactor)
-			amountToHire := int(math.Ceil(float64(amount-h.workerCount) * massHiringPercentage))
-			log.Logvf(log.Info, "Manager wants a total of workers %d; thus an additional %d workers will be hired", amount, amountToHire)
-			if amountToHire <= 0 || amountToHire > massHiringMaxWorker || h.CurrentRateLimitCount() > 0 || h.slowDownCount > 0 {
-				break
-			}
-
-			for i := 0; i < amountToHire; i++ {
-				h.HireNewWorker()
-			}
-			log.Logvf(log.Info, "There are now a total of %d workers", h.workerCount)
-		}
-
-		log.Logv(log.Info, "Hiring manager has stopped mass hiring; switching to single hires")
-
-		for {
-			// The Hiring manager is vulnerable to sudden changes, need further work on this.
-			time.Sleep(10 * time.Second)
-
-			if rateLimitCount := h.CurrentRateLimitCount(); rateLimitCount > 0 {
-				log.Logvf(log.Info, "There was %d `Request rate too large` responses, no extra workers are needed", rateLimitCount)
-
-				if rateLimitCount > 0 {
-					for i := uint64(0); i < uint64(math.Ceil(float64(rateLimitCount)/2.0)); i++ {
-						h.slowdownWorker()
-					}
-				}
-				time.Sleep(5 * time.Second)
-				atomic.StoreUint64(&h.rateLimitCounter, 0)
-				continue
-			}
-
-			if h.slowDownCount > 0 {
-				h.speedupWorker()
-				log.Logv(log.Info, "Manager thinks we can move a bit faster; a worker can speed back up again")
-			} else {
-				h.HireNewWorker()
-				log.Logvf(log.Info, "Manager thinks we can move a bit faster; there are now %d workers", h.workerCount)
-			}
-			time.Sleep(10 * time.Second)
-			atomic.StoreUint64(&h.rateLimitCounter, 0)
-		}
-	}()
-}
-
-// HireNewWorker launches a new parallel worker to help with the ingestion work
+// HireNewWorker launches a new worker routine to help with the ingestion work
 func (h *InsertionManager) HireNewWorker() {
 	session, err := h.SpecifySession()
 	if err != nil {
@@ -221,16 +142,92 @@ func (h *InsertionManager) HireNewWorker() {
 	}()
 }
 
-//NotifyRateLimit is to be invoked from worker to notify the manager to stop adding new workers
-func (h *InsertionManager) NotifyRateLimit() {
-	atomic.AddUint64(&h.rateLimitCounter, 1)
+// Start launches the manager routine which periodically checks whether it can add new workers to speed up the ingestion task
+func (h *InsertionManager) Start(startingAmount int, disableWorkerScaling bool) {
+	if h.SpecifySession == nil {
+		log.Logv(log.Always, "Unable to start manager with no session defined")
+		return
+	}
+	if startingAmount < 1 {
+		log.Logv(log.Always, "Unable to start manager with a worker count less than 1")
+		return
+	}
+	for i := 0; i < startingAmount; i++ {
+		h.HireNewWorker()
+	}
+	if disableWorkerScaling {
+		log.Logv(log.Always, "Auto Scaling of Insertion Workers is disabled in this run")
+		return
+	}
+
+	go h.launchMassHiringManager()
+	log.Logv(log.Info, "Hiring manager has stopped mass hiring; switching to single hires")
+	go h.launchSingleHiringManager()
 }
 
-// CurrentRateLimitCount is invoked from the manager to check if a worker has reported a RateLimit error since the last time it checked.
-func (h *InsertionManager) CurrentRateLimitCount() uint64 {
-	limitCount := atomic.LoadUint64(&h.rateLimitCounter)
-	atomic.StoreUint64(&h.rateLimitCounter, 0)
-	return limitCount
+func (h *InsertionManager) launchMassHiringManager() {
+	for {
+		sampleLatencyData := make([]float64, massHiringSampleSize)
+		sampleChargeData := make([]float64, massHiringSampleSize)
+
+		for i := 0; i < massHiringSampleSize; i++ {
+			h.recordWg.Add(h.workerCount)
+			for i := 0; i < h.workerCount; i++ {
+				h.managerChannels[i] <- MsgRequestSample
+			}
+			h.recordWg.Wait()
+
+			sampleLatencyData[i] = medianFloat64(h.latencyRecords)
+			sampleChargeData[i] = meanInt64(h.consumptionRecords)
+
+			time.Sleep(time.Second)
+		}
+
+		medianLatency := medianFloat64(sampleLatencyData)
+		meanCharge := meanFloat64(sampleChargeData)
+		log.Logvf(log.Info, "Median Insertions every second took %.8f seconds and consumed %.2f RU", medianLatency, meanCharge)
+
+		amount := int(math.Ceil((float64(h.collection.Throughput)*medianLatency)/meanCharge) * estimateWorkerScaleFactor)
+		amountToHire := int(math.Ceil(float64(amount-h.workerCount) * massHiringPercentage))
+		log.Logvf(log.Info, "Manager wants a total of workers %d; thus an additional %d workers will be hired", amount, amountToHire)
+		if amountToHire <= 0 || amountToHire > massHiringMaxWorkerPerHire || h.CurrentRateLimitCount() > 0 || h.slowDownCount > 0 {
+			break
+		}
+
+		for i := 0; i < amountToHire; i++ {
+			h.HireNewWorker()
+		}
+		log.Logvf(log.Info, "There are now a total of %d workers", h.workerCount)
+	}
+}
+
+func (h *InsertionManager) launchSingleHiringManager() {
+	for {
+		time.Sleep(10 * time.Second)
+
+		if rateLimitCount := h.CurrentRateLimitCount(); rateLimitCount > 0 {
+			log.Logvf(log.Info, "There was %d `Request rate too large` responses, no extra workers are needed", rateLimitCount)
+
+			if rateLimitCount > 0 {
+				for i := uint64(0); i < uint64(math.Ceil(float64(rateLimitCount)/2.0)); i++ {
+					h.slowdownWorker()
+				}
+			}
+			time.Sleep(5 * time.Second)
+			atomic.StoreUint64(&h.rateLimitCounter, 0)
+			continue
+		}
+
+		if h.slowDownCount > 0 {
+			h.speedupWorker()
+			log.Logv(log.Info, "Manager thinks we can move a bit faster; a worker can speed back up again")
+		} else {
+			h.HireNewWorker()
+			log.Logvf(log.Info, "Manager thinks we can move a bit faster; there are now %d workers", h.workerCount)
+		}
+		time.Sleep(10 * time.Second)
+		atomic.StoreUint64(&h.rateLimitCounter, 0)
+	}
 }
 
 func (h *InsertionManager) slowdownWorker() {
