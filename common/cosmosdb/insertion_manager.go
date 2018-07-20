@@ -23,6 +23,7 @@ const (
 	estimateWorkerScaleFactor = 1.45
 	massHiringPercentage      = 0.8
 	massHiringMaxWorker       = 150
+	massHiringSampleSize      = 5
 )
 
 type InsertionManager struct {
@@ -121,27 +122,29 @@ func (h *InsertionManager) Start(startingAmount int, disableWorkerScaling bool) 
 		return
 	}
 	go func() {
-		sleepTime := 5 * time.Second
-
 		for {
-			time.Sleep(sleepTime)
+			sampleLatencyData := make([]float64, massHiringSampleSize)
+			sampleChargeData := make([]float64, massHiringSampleSize)
 
-			h.recordWg.Add(h.workerCount)
-			for i := 0; i < h.workerCount; i++ {
-				atomic.StoreInt64(&h.latencyRecords[i], -1)
-				atomic.StoreInt64(&h.consumptionRecords[i], -1)
-			}
-			h.recordWg.Wait()
+			for i := 0; i < massHiringSampleSize; i++ {
+				h.recordWg.Add(h.workerCount)
+				for i := 0; i < h.workerCount; i++ {
+					atomic.StoreInt64(&h.latencyRecords[i], -1)
+					atomic.StoreInt64(&h.consumptionRecords[i], -1)
+				}
+				h.recordWg.Wait()
 
-			var latencySum int64
-			var chargeSum int64
-			for i := 0; i < h.workerCount; i++ {
-				latencySum += atomic.LoadInt64(&h.latencyRecords[i])
-				chargeSum += atomic.LoadInt64(&h.consumptionRecords[i])
+				averageSampleLatency := meanInt64(h.latencyRecords)
+				averageSampleCharge := meanInt64(h.consumptionRecords)
+
+				sampleLatencyData[i] = averageSampleLatency
+				sampleChargeData[i] = averageSampleCharge
+				time.Sleep(time.Second)
 			}
-			averageLatency := float64(latencySum) / float64(h.workerCount)
-			averageCharge := float64(chargeSum) / float64(h.workerCount)
-			log.Logvf(log.Info, "On average, insertions took %.2f nanoseconds and consumed %.2f RU", averageLatency, averageCharge)
+
+			averageLatency := medianFloat64(sampleLatencyData)
+			averageCharge := medianFloat64(sampleChargeData)
+			log.Logvf(log.Info, "Median Insertions every second took %.2f nanoseconds and consumed %.2f RU", averageLatency, averageCharge)
 
 			amount := int(math.Ceil((float64(h.collection.Throughput)*averageLatency/1.0e+6)/averageCharge) * estimateWorkerScaleFactor)
 			amountToHire := int(math.Ceil(float64(amount-h.workerCount) * massHiringPercentage))
@@ -154,7 +157,6 @@ func (h *InsertionManager) Start(startingAmount int, disableWorkerScaling bool) 
 				h.HireNewWorker()
 			}
 			log.Logvf(log.Info, "There are now a total of %d workers", h.workerCount)
-			sleepTime = sleepTime + (3 * time.Second)
 		}
 
 		log.Logv(log.Info, "Hiring manager has stopped mass hiring; switching to single hires")

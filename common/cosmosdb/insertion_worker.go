@@ -11,7 +11,6 @@ import (
 
 const (
 	tooManyRequestTimeLimit = 5
-	serverOpTimeoutLimit    = 30
 	awaitBetweenOpTime      = 250
 )
 
@@ -106,32 +105,25 @@ func (iw *InsertionWorker) insert(doc interface{}) error {
 	// Prevent the retry from re-creating the insertOp object again by explicitly storing it
 	insertOperation := mgo.CreateInsertOp(iw.collection.FullName, doc)
 	TooManyRequestsDeadline := time.Now().Add(tooManyRequestTimeLimit * time.Second)
-	ServerOpTimeoutDeadline := time.Now().Add(serverOpTimeoutLimit * time.Second)
 
 retry:
 	latency, err := iw.collection.InsertWithOp(insertOperation)
 	if err != nil {
 		if qerr, ok := err.(*mgo.QueryError); ok {
 			switch qerr.Code {
-			case ServerOpTimeout:
-				log.Logv(log.Always, "Requests are exceeding time limit...let's take a 10 second break")
-				time.Sleep(10 * time.Second)
-
-				if time.Now().After(ServerOpTimeoutDeadline) {
-					log.Logvf(log.Always, "Maximum retries for `Exceeded Time Limit` exceeded %d seconds; moving on", serverOpTimeoutLimit)
-					return fmt.Errorf("ExceedInsertDeadline-Timeout")
-				}
-				goto retry
 
 			case TooManyRequests:
 				iw.manager.NotifyRateLimit()
 				time.Sleep(5 * time.Millisecond)
 
 				if time.Now().After(TooManyRequestsDeadline) {
-					log.Logvf(log.Always, "Maximum retries for `Throughput` exceeded %d seconds; moving on", tooManyRequestTimeLimit)
 					return fmt.Errorf("ExceedInsertDeadline-Throughput")
 				}
 				goto retry
+
+			case ServerOpTimeout:
+				log.Logv(log.Always, "The server exceeded its alloted time limit to process this request")
+				return fmt.Errorf("ExceedInsertDeadline-Timeout")
 
 			case MalformedRequest:
 				log.Logv(log.Always, "The request sent was malformed")
