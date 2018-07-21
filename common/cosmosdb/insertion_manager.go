@@ -76,7 +76,6 @@ func NewInsertionManager(ingestionChannel chan interface{}, collection *CosmosDB
 	}
 }
 
-// AwaitAllWorkers blocks until all workers have exited
 func (h *InsertionManager) AwaitAllWorkers() {
 	h.workerWg.Wait()
 	log.Logv(log.Info, "All workers have finished")
@@ -88,31 +87,23 @@ func (h *InsertionManager) AwaitAllWorkers() {
 	}
 }
 
-// CountWorkers gives the current amount of workers hired
 func (h *InsertionManager) CountWorkers() int {
 	return h.workerCount
 }
 
 //NotifyRateLimit is to be invoked from a worker to notify the manager to stop adding new workers
-func (h *InsertionManager) NotifyRateLimit() {
+func (h *InsertionManager) notifyRateLimit() {
 	atomic.AddUint64(&h.rateLimitCounter, 1)
 }
 
-// CurrentRateLimitCount is invoked from the manager to check if a worker has reported a RateLimit error since the last time it checked.
-func (h *InsertionManager) CurrentRateLimitCount() uint64 {
-	limitCount := atomic.LoadUint64(&h.rateLimitCounter)
-	atomic.StoreUint64(&h.rateLimitCounter, 0)
-	return limitCount
-}
-
-// SubmitSample is invoked from the workers to provide the manager with information it needs to calculate whether we can go faster or not
-func (h *InsertionManager) SubmitSample(workerId int, latency int64, charge int64) {
+// SubmitSample is invoked from a worker to provide the manager with information it needs to calculate whether we can go faster or not
+func (h *InsertionManager) submitSample(workerID int, latency int64, charge int64) {
 	if latency < 0 {
 		return
 	}
 	defer h.recordWg.Done()
-	h.latencyRecords[workerId] = float64(latency) / 1.0e+6
-	h.consumptionRecords[workerId] = charge
+	h.latencyRecords[workerID] = float64(latency) / 1.0e+6
+	h.consumptionRecords[workerID] = charge
 }
 
 // HireNewWorker launches a new worker routine to help with the ingestion work
@@ -125,7 +116,9 @@ func (h *InsertionManager) HireNewWorker() {
 	collection := session.DB(h.collection.Collection.Database.Name).C(h.collection.Collection.Name)
 
 	newWorkerID := h.workerCount
-	worker := NewInsertionWorker(collection, h, h.ingestionChannel, newWorkerID, h.stopOnError)
+	worker := NewInsertionWorker(collection, newWorkerID, h.stopOnError)
+	worker.NotifyOfStatistics = h.submitSample
+	worker.NotifyOfThrottle = h.notifyRateLimit
 	worker.OnDocumentIngestion = h.OnDocumentIngestion
 
 	h.latencyRecords = append(h.latencyRecords, 0)
@@ -139,7 +132,7 @@ func (h *InsertionManager) HireNewWorker() {
 	go func() {
 		defer session.Close()
 		defer h.workerWg.Done()
-		if err := worker.Run(h.managerChannels[newWorkerID], h.backupChannel); err != nil {
+		if err := worker.Run(h.ingestionChannel, h.backupChannel, h.managerChannels[newWorkerID]); err != nil {
 			log.Logvf(log.Always, "Worker %d exiting due to an error: %v", newWorkerID, err)
 		}
 	}()
@@ -211,7 +204,7 @@ func (h *InsertionManager) launchSingleHiringManager() {
 	for {
 		time.Sleep(10 * time.Second)
 
-		if rateLimitCount := h.CurrentRateLimitCount(); rateLimitCount > 0 {
+		if rateLimitCount := h.currentRateLimitCount(); rateLimitCount > 0 {
 			log.Logvf(log.Info, "There was %d `Request rate too large` responses, no extra workers are needed", rateLimitCount)
 
 			if rateLimitCount > 0 {
@@ -234,6 +227,13 @@ func (h *InsertionManager) launchSingleHiringManager() {
 		time.Sleep(10 * time.Second)
 		atomic.StoreUint64(&h.rateLimitCounter, 0)
 	}
+}
+
+// currentRateLimitCount checks if any workers has reported being throttled since the last time the manager checked.
+func (h *InsertionManager) currentRateLimitCount() uint64 {
+	limitCount := atomic.LoadUint64(&h.rateLimitCounter)
+	atomic.StoreUint64(&h.rateLimitCounter, 0)
+	return limitCount
 }
 
 func (h *InsertionManager) signalSlowdown() {
@@ -267,7 +267,7 @@ func (h *InsertionManager) filterMassHiringChoices(amountToHire int) error {
 	if amountToHire > massHiringMaxWorkerPerHire {
 		return fmt.Errorf("manager attempted to hire too many workers")
 	}
-	if h.CurrentRateLimitCount() > 0 || h.slowDownCount > 0 {
+	if h.currentRateLimitCount() > 0 || h.slowDownCount > 0 {
 		return fmt.Errorf("manager was recently throttled")
 	}
 	return nil
