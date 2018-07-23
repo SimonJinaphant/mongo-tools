@@ -11,7 +11,6 @@ import (
 
 const (
 	tooManyRequestTimeLimit = 5
-	serverOpTimeoutLimit    = 30
 	awaitBetweenOpTime      = 250
 )
 
@@ -22,39 +21,41 @@ const (
 )
 
 type InsertionWorker struct {
-	collection          *mgo.Collection
-	manager             *InsertionManager
-	ingestionChannel    chan interface{}
-	workerID            int
-	stopOnError         bool
-	OnDocumentIngestion func()
+	collection           *mgo.Collection
+	workerID             int
+	waitTime             int
+	stopOnError          bool
+	shouldSendStatistics bool
+	OnDocumentIngestion  func()
+	NotifyOfStatistics   func(int, int64, int64)
+	NotifyOfThrottle     func()
 }
 
-func NewInsertionWorker(collection *mgo.Collection, manager *InsertionManager,
-	ingestionChannel chan interface{}, workerID int, stopOnError bool) *InsertionWorker {
-
+func NewInsertionWorker(collection *mgo.Collection, workerID int, stopOnError bool) *InsertionWorker {
 	return &InsertionWorker{
-		collection:       collection,
-		manager:          manager,
-		ingestionChannel: ingestionChannel,
-		workerID:         workerID,
-		stopOnError:      stopOnError,
+		collection:           collection,
+		workerID:             workerID,
+		waitTime:             0,
+		stopOnError:          stopOnError,
+		shouldSendStatistics: false,
 	}
 }
 
-func (iw *InsertionWorker) Run(messageChannel <-chan InsertionManagerMessage, backupChannel chan interface{}) error {
-	waitTime := 0
+func (iw *InsertionWorker) Run(ingestionChannel <-chan interface{}, backupChannel chan interface{},
+	messageChannel <-chan InsertionManagerMessage) error {
 	for {
-		time.Sleep(time.Duration(waitTime) * time.Millisecond)
+		time.Sleep(time.Duration(iw.waitTime) * time.Millisecond)
 		select {
 		case managerMsg := <-messageChannel:
 			switch managerMsg {
 			case MsgSlowdown:
-				waitTime += awaitBetweenOpTime
-				log.Logvf(log.Info, "Worker %d was told to slow down; it will now await %d ms between operations", iw.workerID, waitTime)
+				iw.waitTime += awaitBetweenOpTime
+				log.Logvf(log.Info, "Worker %d was told to slow down; it will now await %d ms between operations", iw.workerID, iw.waitTime)
 			case MsgSpeedup:
-				waitTime -= awaitBetweenOpTime
-				log.Logvf(log.Info, "Worker %d was told to speed back up; it will now await %d ms between operations", iw.workerID, waitTime)
+				iw.waitTime -= awaitBetweenOpTime
+				log.Logvf(log.Info, "Worker %d was told to speed back up; it will now await %d ms between operations", iw.workerID, iw.waitTime)
+			case MsgRequestSample:
+				iw.shouldSendStatistics = true
 			default:
 				log.Logvf(log.Info, "Worker %d got an unknown message from manager", iw.workerID)
 			}
@@ -78,7 +79,7 @@ func (iw *InsertionWorker) Run(messageChannel <-chan InsertionManagerMessage, ba
 			}
 
 		default:
-			document, alive := <-iw.ingestionChannel
+			document, alive := <-ingestionChannel
 			if !alive {
 				return nil
 			}
@@ -105,33 +106,26 @@ func (iw *InsertionWorker) Run(messageChannel <-chan InsertionManagerMessage, ba
 func (iw *InsertionWorker) insert(doc interface{}) error {
 	// Prevent the retry from re-creating the insertOp object again by explicitly storing it
 	insertOperation := mgo.CreateInsertOp(iw.collection.FullName, doc)
-	TooManyRequestsDeadline := time.Now().Add(tooManyRequestTimeLimit * time.Second)
-	ServerOpTimeoutDeadline := time.Now().Add(serverOpTimeoutLimit * time.Second)
+	tooManyRequestsDeadline := time.Now().Add(tooManyRequestTimeLimit * time.Second)
 
 retry:
 	latency, err := iw.collection.InsertWithOp(insertOperation)
 	if err != nil {
 		if qerr, ok := err.(*mgo.QueryError); ok {
 			switch qerr.Code {
-			case ServerOpTimeout:
-				log.Logv(log.Always, "Requests are exceeding time limit...let's take a 10 second break")
-				time.Sleep(10 * time.Second)
-
-				if time.Now().After(ServerOpTimeoutDeadline) {
-					log.Logvf(log.Always, "Maximum retries for `Exceeded Time Limit` exceeded %d seconds; moving on", serverOpTimeoutLimit)
-					return fmt.Errorf("ExceedInsertDeadline-Timeout")
-				}
-				goto retry
 
 			case TooManyRequests:
-				iw.manager.NotifyRateLimit()
+				iw.NotifyOfThrottle()
 				time.Sleep(5 * time.Millisecond)
 
-				if time.Now().After(TooManyRequestsDeadline) {
-					log.Logvf(log.Always, "Maximum retries for `Throughput` exceeded %d seconds; moving on", tooManyRequestTimeLimit)
+				if time.Now().After(tooManyRequestsDeadline) {
 					return fmt.Errorf("ExceedInsertDeadline-Throughput")
 				}
 				goto retry
+
+			case ServerOpTimeout:
+				log.Logv(log.Always, "The server exceeded its alloted time limit to process this request")
+				return fmt.Errorf("ExceedInsertDeadline-Timeout")
 
 			case MalformedRequest:
 				log.Logv(log.Always, "The request sent was malformed")
@@ -141,12 +135,13 @@ retry:
 			}
 		}
 	} else {
-		if iw.manager.CanNotify(iw.workerID) {
-			insertCharge, err := iw.collection.GetLastRequestStatistics()
+		if iw.shouldSendStatistics {
+			requestCost, err := iw.collection.GetLastRequestStatistics()
 			if err != nil {
-				log.Logv(log.Info, "Unable to get RU cost from last operation")
+				log.Logv(log.Info, "Unable to get latest RU cost")
 			}
-			iw.manager.Notify(iw.workerID, latency, insertCharge)
+			iw.NotifyOfStatistics(iw.workerID, latency, requestCost)
+			iw.shouldSendStatistics = false
 		}
 	}
 	return err
