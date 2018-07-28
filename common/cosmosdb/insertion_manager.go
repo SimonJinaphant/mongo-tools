@@ -20,12 +20,13 @@ const (
 )
 
 const (
-	backupBufferSize           = 1000
-	messageChannelSize         = 100
-	estimateWorkerScaleFactor  = 1.45
-	massHiringPercentage       = 0.8
-	massHiringMaxWorkerPerHire = 200
-	massHiringSampleSize       = 5
+	backupBufferSize              = 1000
+	messageChannelSize            = 100
+	workerScaleFactorWithIndex    = 1.45
+	workerScaleFactorWithoutIndex = 2.00
+	massHiringPercentage          = 0.7
+	massHiringMaxWorkerPerHire    = 400
+	massHiringSampleSize          = 5
 )
 
 type InsertionManager struct {
@@ -48,10 +49,11 @@ type InsertionManager struct {
 	SpecifySession      func() (*mgo.Session, error)
 
 	stopOnError      bool
+	dropIndex        bool
 	ingestionChannel chan interface{}
 }
 
-func NewInsertionManager(ingestionChannel chan interface{}, collection *CosmosDBCollection, stopOnError bool) *InsertionManager {
+func NewInsertionManager(ingestionChannel chan interface{}, collection *CosmosDBCollection, stopOnError bool, dropIndex bool) *InsertionManager {
 	return &InsertionManager{
 		latencyRecords:     make([]float64, 0, 0),
 		consumptionRecords: make([]int64, 0, 0),
@@ -72,6 +74,7 @@ func NewInsertionManager(ingestionChannel chan interface{}, collection *CosmosDB
 		SpecifySession:      nil,
 
 		stopOnError:      stopOnError,
+		dropIndex:        dropIndex,
 		ingestionChannel: ingestionChannel,
 	}
 }
@@ -155,6 +158,13 @@ func (h *InsertionManager) Start(startingAmount int, disableWorkerScaling bool) 
 		log.Logv(log.Always, "Auto Scaling of Insertion Workers is disabled in this run")
 		return
 	}
+	if h.dropIndex {
+		if derr := h.collection.Collection.DropAllIndexes(); derr != nil {
+			log.Logvf(log.Always, "Unable to drop index: %v", derr)
+			return
+		}
+		log.Logv(log.Info, "Successfully DropAllIndex on Collection")
+	}
 
 	go func() {
 		h.launchMassHiringManager()
@@ -164,6 +174,12 @@ func (h *InsertionManager) Start(startingAmount int, disableWorkerScaling bool) 
 }
 
 func (h *InsertionManager) launchMassHiringManager() {
+	estimateWorkerScaleFactor := workerScaleFactorWithIndex
+	if h.dropIndex {
+		estimateWorkerScaleFactor = workerScaleFactorWithoutIndex
+	}
+	log.Logvf(log.Info, "Estimate Worker Scale Factor: %.2f", estimateWorkerScaleFactor)
+
 	for {
 		sampleLatencyData := make([]float64, massHiringSampleSize)
 		sampleChargeData := make([]float64, massHiringSampleSize)
