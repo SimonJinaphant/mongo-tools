@@ -316,7 +316,6 @@ func (restore *MongoRestore) RestoreCollectionToCosmosDB(cosmosDbCollection *cos
 			}
 		}
 		close(docChan)
-		log.Logvf(log.Info, "All bson has been loaded for insertion")
 	}()
 
 	log.Logvf(log.Info, "using %v insertion workers", maxInsertWorkers)
