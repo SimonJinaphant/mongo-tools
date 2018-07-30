@@ -445,7 +445,7 @@ func (imp *MongoImport) ingestDocumentsIntoCosmosDB(readDocs chan bson.D, cosmos
 		close(ingestionChannel)
 	}()
 
-	manager := cosmosdb.NewInsertionManager(ingestionChannel, cosmosDbCollection, imp.IngestOptions.StopOnError)
+	manager := cosmosdb.NewInsertionManager(ingestionChannel, cosmosDbCollection, imp.IngestOptions.StopOnError, imp.ToolOptions.General.DropIndex)
 	manager.SpecifySession = func() (*mgo.Session, error) {
 		session, err := imp.SessionProvider.GetSession()
 		if err != nil {
