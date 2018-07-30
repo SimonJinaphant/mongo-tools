@@ -25,7 +25,7 @@ const (
 	workerScaleFactorWithIndex    = 1.45
 	workerScaleFactorWithoutIndex = 2.00
 	massHiringPercentage          = 0.7
-	massHiringMaxWorkerPerHire    = 400
+	massHiringMaxWorkerPerHire    = 200
 	massHiringSampleSize          = 5
 )
 
@@ -209,6 +209,10 @@ func (h *InsertionManager) launchMassHiringManager() {
 			log.Logv(log.Info, "Manager failed to mass hire new workers because: "+result.Error())
 			return
 		}
+		if amountToHire > massHiringMaxWorkerPerHire {
+			amountToHire = massHiringMaxWorkerPerHire
+			log.Logvf(log.Info, "Manager capped out hiring at %d new workers", amountToHire)
+		}
 		for i := 0; i < amountToHire; i++ {
 			h.HireNewWorker()
 		}
@@ -279,9 +283,6 @@ func (h *InsertionManager) signalSpeedup() {
 func (h *InsertionManager) filterMassHiringChoices(amountToHire int) error {
 	if amountToHire <= 0 {
 		return fmt.Errorf("manager has an overflow of workers")
-	}
-	if amountToHire > massHiringMaxWorkerPerHire {
-		return fmt.Errorf("manager attempted to hire too many workers")
 	}
 	if h.currentRateLimitCount() > 0 || h.slowDownCount > 0 {
 		return fmt.Errorf("manager was recently throttled")
