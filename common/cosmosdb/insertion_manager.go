@@ -123,11 +123,15 @@ func (h *InsertionManager) HireNewWorker() {
 	worker.NotifyOfStatistics = h.submitSample
 	worker.NotifyOfThrottle = h.notifyRateLimit
 	worker.OnDocumentIngestion = h.OnDocumentIngestion
+	worker.ingestionChannel = h.ingestionChannel
+	worker.backupChannel = h.backupChannel
 
 	h.latencyRecords = append(h.latencyRecords, 0)
 	h.consumptionRecords = append(h.consumptionRecords, 0)
+
 	h.managerChannels = append(h.managerChannels, nil)
 	h.managerChannels[newWorkerID] = make(chan InsertionManagerMessage, messageChannelSize)
+	worker.messageChannel = h.managerChannels[newWorkerID]
 
 	h.workerWg.Add(1)
 	h.workerCount++
@@ -135,7 +139,7 @@ func (h *InsertionManager) HireNewWorker() {
 	go func() {
 		defer session.Close()
 		defer h.workerWg.Done()
-		if err := worker.Run(h.ingestionChannel, h.backupChannel, h.managerChannels[newWorkerID]); err != nil {
+		if err := worker.Run(); err != nil {
 			log.Logvf(log.Always, "Worker %d exiting due to an error: %v", newWorkerID, err)
 		}
 	}()
