@@ -205,15 +205,12 @@ func (h *InsertionManager) launchMassHiringManager() {
 		amountToHire := int(math.Ceil(float64(amount-h.workerCount) * massHiringPercentage))
 		log.Logvf(log.Info, "Manager wants a total of workers %d and thus requests %d additional worker(s) to be hired.", amount, amountToHire)
 
-		if result := h.filterMassHiringChoices(amountToHire); result != nil {
-			log.Logv(log.Info, "Manager failed to mass hire new workers because: "+result.Error())
+		result, hiringErr := verifyMassHiringChoices(amountToHire, h.currentRateLimitCount(), h.slowDownCount)
+		if hiringErr != nil {
+			log.Logv(log.Info, "Manager failed to mass hire new workers because: "+hiringErr.Error())
 			return
 		}
-		if amountToHire > massHiringMaxWorkerPerHire {
-			amountToHire = massHiringMaxWorkerPerHire
-			log.Logvf(log.Info, "Manager capped out hiring at %d new workers", amountToHire)
-		}
-		for i := 0; i < amountToHire; i++ {
+		for i := 0; i < result; i++ {
 			h.HireNewWorker()
 		}
 		log.Logvf(log.Info, "There are now a total of %d workers", h.workerCount)
@@ -280,12 +277,16 @@ func (h *InsertionManager) signalSpeedup() {
 	h.slowDownCount--
 }
 
-func (h *InsertionManager) filterMassHiringChoices(amountToHire int) error {
+func verifyMassHiringChoices(amountToHire int, rateLimitCount uint64, slowDownCount int) (int, error) {
+	if rateLimitCount > 0 || slowDownCount > 0 {
+		return 0, fmt.Errorf("manager was recently throttled")
+	}
 	if amountToHire <= 0 {
-		return fmt.Errorf("manager has an overflow of workers")
+		return 0, fmt.Errorf("manager has an overflow of workers")
 	}
-	if h.currentRateLimitCount() > 0 || h.slowDownCount > 0 {
-		return fmt.Errorf("manager was recently throttled")
+	if amountToHire > massHiringMaxWorkerPerHire {
+		log.Logvf(log.Info, "Manager capped out hiring at %d new workers", amountToHire)
+		return massHiringMaxWorkerPerHire, nil
 	}
-	return nil
+	return amountToHire, nil
 }
