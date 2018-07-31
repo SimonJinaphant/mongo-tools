@@ -26,6 +26,9 @@ type InsertionWorker struct {
 	waitTime             int
 	stopOnError          bool
 	shouldSendStatistics bool
+	ingestionChannel     <-chan interface{}
+	backupChannel        chan interface{}
+	messageChannel       <-chan InsertionManagerMessage
 	OnDocumentIngestion  func()
 	NotifyOfStatistics   func(int, int64, int64)
 	NotifyOfThrottle     func()
@@ -41,52 +44,28 @@ func NewInsertionWorker(collection *mgo.Collection, workerID int, stopOnError bo
 	}
 }
 
-func (iw *InsertionWorker) Run(ingestionChannel <-chan interface{}, backupChannel chan interface{},
-	messageChannel <-chan InsertionManagerMessage) error {
+func (iw *InsertionWorker) Run() error {
 	for {
 		time.Sleep(time.Duration(iw.waitTime) * time.Millisecond)
 		select {
-		case managerMsg := <-messageChannel:
-			switch managerMsg {
-			case MsgSlowdown:
-				iw.waitTime += awaitBetweenOpTime
-				log.Logvf(log.Info, "Worker %d was told to slow down; it will now await %d ms between operations", iw.workerID, iw.waitTime)
-			case MsgSpeedup:
-				iw.waitTime -= awaitBetweenOpTime
-				log.Logvf(log.Info, "Worker %d was told to speed back up; it will now await %d ms between operations", iw.workerID, iw.waitTime)
-			case MsgRequestSample:
-				iw.shouldSendStatistics = true
-			default:
-				log.Logvf(log.Info, "Worker %d got an unknown message from manager", iw.workerID)
-			}
+		case managerMsg := <-iw.messageChannel:
+			iw.handleMessage(managerMsg)
 
-		case backupDoc := <-backupChannel:
-			log.Logvf(log.Info, "Worker %d picked up a document from the backup channel", iw.workerID)
-			if err := iw.insert(backupDoc); err != nil {
-				if filterErr := FilterStandardErrors(iw.stopOnError, err); filterErr != nil {
-					return filterErr
-				}
-				if strings.Contains(err.Error(), "duplicate key") {
-					log.Logvf(log.Always, "Worker %d inserted a backup that seem to have previously succeeded", iw.workerID)
-					continue
-				}
-				if strings.Contains(err.Error(), "ExceedInsertDeadline") {
-					backupChannel <- backupDoc
-					continue
-				}
-				log.Logvf(log.Always, "Worker %d failed to insert a backup document due to: %v", iw.workerID, err)
-				return err
+		case backupDoc := <-iw.backupChannel:
+			if insertErr := iw.handleBackup(backupDoc, iw.insert(backupDoc)); insertErr != nil {
+				return insertErr
 			}
+			continue
 
 		default:
-			document, alive := <-ingestionChannel
+			document, alive := <-iw.ingestionChannel
 			if !alive {
 				return nil
 			}
 
 			if err := iw.insert(document); err != nil {
 				log.Logvf(log.Info, "Worker %d is backing up a document due to an error: %v", iw.workerID, err)
-				backupChannel <- document
+				iw.backupChannel <- document
 
 				if err = FilterStandardErrors(iw.stopOnError, err); err != nil {
 					return err
@@ -145,4 +124,39 @@ retry:
 		}
 	}
 	return err
+}
+
+func (iw *InsertionWorker) handleMessage(managerMsg InsertionManagerMessage) {
+	switch managerMsg {
+	case MsgSlowdown:
+		iw.waitTime += awaitBetweenOpTime
+		log.Logvf(log.Info, "Worker %d was told to slow down; it will now await %d ms between operations", iw.workerID, iw.waitTime)
+	case MsgSpeedup:
+		iw.waitTime -= awaitBetweenOpTime
+		log.Logvf(log.Info, "Worker %d was told to speed back up; it will now await %d ms between operations", iw.workerID, iw.waitTime)
+	case MsgRequestSample:
+		iw.shouldSendStatistics = true
+	default:
+		log.Logvf(log.Info, "Worker %d got an unknown message from manager", iw.workerID)
+	}
+}
+
+func (iw *InsertionWorker) handleBackup(backupDoc interface{}, insertionResult error) error {
+	log.Logvf(log.Info, "Worker %d picked up a document from the backup channel", iw.workerID)
+	if insertionResult != nil {
+		if filterErr := FilterStandardErrors(iw.stopOnError, insertionResult); filterErr != nil {
+			return filterErr
+		}
+		if strings.Contains(insertionResult.Error(), "duplicate key") {
+			log.Logvf(log.Always, "Worker %d inserted a backup that seem to have previously succeeded", iw.workerID)
+			return nil
+		}
+		if strings.Contains(insertionResult.Error(), "ExceedInsertDeadline") {
+			iw.backupChannel <- backupDoc
+			return nil
+		}
+		log.Logvf(log.Always, "Worker %d failed to insert a backup document due to: %v", iw.workerID, insertionResult)
+		return insertionResult
+	}
+	return nil
 }

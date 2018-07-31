@@ -9,13 +9,6 @@ import (
 )
 
 const (
-	fileSizeWarning = int64(2e9)
-	fileSizeFailure = int64(2 * fileSizeWarning)
-
-	shardkeyMessage = `
-	Re-run this tool with the parameters --shardKey <key>, where <key> is a valid Mongo DB Shard Key.
-	For more information about Shard Key visit: https://docs.mongodb.com/manual/sharding/#shard-keys.`
-
 	throughputMessage = `
 	To ingest into Azure Cosmos DB you must specify a throughput via re-running the tool with --throughput <int>
 	If you specified a Shard Key you can use a throughput value between 10,000 to 50,000;

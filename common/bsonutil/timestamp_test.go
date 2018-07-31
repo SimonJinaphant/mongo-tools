@@ -9,7 +9,7 @@ package bsonutil
 import (
 	"github.com/mongodb/mongo-tools/common/json"
 	. "github.com/smartystreets/goconvey/convey"
-	"gopkg.in/mgo.v2/bson"
+	"github.com/globalsign/mgo/bson"
 	"testing"
 )
 

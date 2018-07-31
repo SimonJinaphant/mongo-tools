@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	mgo "github.com/globalsign/mgo"
 	"github.com/globalsign/mgo/bson"
 	"github.com/mongodb/mongo-tools/common/db"
 	"github.com/mongodb/mongo-tools/common/log"
@@ -19,7 +20,6 @@ import (
 	"github.com/mongodb/mongo-tools/mongostat/stat_consumer"
 	"github.com/mongodb/mongo-tools/mongostat/stat_consumer/line"
 	"github.com/mongodb/mongo-tools/mongostat/status"
-	mgo "gopkg.in/mgo.v2"
 )
 
 // MongoStat is a container for the user-specified options and
