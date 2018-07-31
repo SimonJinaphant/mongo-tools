@@ -10,6 +10,20 @@ import (
 	"github.com/mongodb/mongo-tools/common/log"
 )
 
+const (
+	// 1 GB = 1024^3 as by JEDEC memory standards:
+	gigabyte        = int64(1073741824)
+	fileSizeWarning = int64(2 * gigabyte)
+	fileSizeFailure = int64(4 * gigabyte)
+
+	fileSizeWarningErrMsg = "File is larger than 2 GB"
+	fileSizeFailureErrMsg = "File is larger than 4 GB"
+
+	shardkeyMessage = `
+	Re-run this tool with the parameters --shardKey <key>, where <key> is a valid Mongo DB Shard Key.
+	For more information about Shard Key visit: https://docs.mongodb.com/manual/sharding/#shard-keys.`
+)
+
 func BenchmarkTime(start time.Time, name string) {
 	elapsed := time.Since(start)
 	log.Logvf(log.Always, "%s took %s", name, elapsed)
@@ -65,9 +79,9 @@ func ValidateSizeRequirement(shardKey string, fileSize int64, ignoreSizeWarning 
 	log.Logvf(log.Info, "File size is: %d", fileSize)
 	if shardKey == "" {
 		if fileSize > fileSizeFailure {
-			log.Logv(log.Always, "The file to be ingested is larger than 5GB; for performance reasons we require you specify a Shard Key when migrating into CosmosDB")
+			log.Logv(log.Always, "The file to be ingested is larger than 4GB; for performance reasons we require you specify a Shard Key when migrating into CosmosDB")
 			log.Logv(log.Always, shardkeyMessage)
-			return fmt.Errorf("File is larger than 5GB")
+			return fmt.Errorf(fileSizeFailureErrMsg)
 		}
 
 		if ignoreSizeWarning {
@@ -79,7 +93,7 @@ func ValidateSizeRequirement(shardKey string, fileSize int64, ignoreSizeWarning 
 			log.Logv(log.Always, "The file to be ingested is larger than 2GB; for best performance on Cosmos DB we recommend you specify a shard key")
 			log.Logv(log.Always, shardkeyMessage)
 			log.Logv(log.Always, "or suppress this warning with the flag --ignoreSizeWarning")
-			return fmt.Errorf("File is larger than 2GB")
+			return fmt.Errorf(fileSizeWarningErrMsg)
 		}
 
 		log.Logvf(log.Info, "The file to be ingested is under 2GB, which is acceptable for an Fixed (un-sharded) Cosmos DB collection")
