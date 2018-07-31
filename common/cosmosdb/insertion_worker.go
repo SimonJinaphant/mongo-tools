@@ -148,7 +148,7 @@ func (iw *InsertionWorker) handleBackup(backupDoc interface{}, insertionResult e
 			return filterErr
 		}
 		if strings.Contains(insertionResult.Error(), "duplicate key") {
-			log.Logvf(log.Always, "Worker %d inserted a backup that seem to have previously succeeded", iw.workerID)
+			log.Logvf(log.Info, "Worker %d inserted a backup that seem to have previously succeeded", iw.workerID)
 			return nil
 		}
 		if strings.Contains(insertionResult.Error(), "ExceedInsertDeadline") {

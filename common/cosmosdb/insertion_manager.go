@@ -289,7 +289,7 @@ func verifyMassHiringChoices(amountToHire int, rateLimitCount uint64, slowDownCo
 		return 0, fmt.Errorf("manager has an overflow of workers")
 	}
 	if amountToHire > massHiringMaxWorkerPerHire {
-		log.Logvf(log.Info, "Manager capped out hiring at %d new workers", amountToHire)
+		log.Logvf(log.Info, "Manager capped out hiring at %d new workers", massHiringMaxWorkerPerHire)
 		return massHiringMaxWorkerPerHire, nil
 	}
 	return amountToHire, nil
