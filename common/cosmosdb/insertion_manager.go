@@ -209,7 +209,6 @@ func (h *InsertionManager) launchMassHiringManager() {
 		amountToHire := int(math.Ceil(float64(amount-h.workerCount) * massHiringPercentage))
 		log.Logvf(log.Info, "Manager wants a total of workers %d and thus requests %d additional worker(s) to be hired.", amount, amountToHire)
 
-
 		result, hiringErr := verifyMassHiringChoices(amountToHire, h.currentRateLimitCount(), h.slowDownCount)
 		if hiringErr != nil {
 			log.Logv(log.Info, "Manager failed to mass hire new workers because: "+hiringErr.Error())
@@ -263,7 +262,11 @@ func (h *InsertionManager) signalSlowdown() {
 	if targetWorker >= h.workerCount {
 		targetWorker = targetWorker % h.workerCount
 	}
-	h.managerChannels[targetWorker] <- MsgSlowdown
+	select {
+	case h.managerChannels[targetWorker] <- MsgSlowdown:
+	default:
+		log.Logvf(log.Info, "Failed to send slowdown message to Worker %d", targetWorker)
+	}
 	h.slowDownCount++
 }
 
@@ -278,7 +281,11 @@ func (h *InsertionManager) signalSpeedup() {
 		targetWorker = targetWorker % h.workerCount
 	}
 
-	h.managerChannels[targetWorker] <- MsgSpeedup
+	select {
+	case h.managerChannels[targetWorker] <- MsgSpeedup:
+	default:
+		log.Logvf(log.Info, "Failed to send speedup message to Worker %d", targetWorker)
+	}
 	h.slowDownCount--
 }
 
