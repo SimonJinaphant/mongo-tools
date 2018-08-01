@@ -59,6 +59,7 @@ func (iw *InsertionWorker) Run() error {
 
 		default:
 			document, alive := <-iw.ingestionChannel
+
 			if !alive {
 				return nil
 			}
@@ -66,7 +67,6 @@ func (iw *InsertionWorker) Run() error {
 			if err := iw.insert(document); err != nil {
 				log.Logvf(log.Info, "Worker %d is backing up a document due to an error: %v", iw.workerID, err)
 				iw.backupChannel <- document
-
 				if err = FilterStandardErrors(iw.stopOnError, err); err != nil {
 					return err
 				}

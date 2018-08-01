@@ -209,6 +209,7 @@ func (h *InsertionManager) launchMassHiringManager() {
 		amountToHire := int(math.Ceil(float64(amount-h.workerCount) * massHiringPercentage))
 		log.Logvf(log.Info, "Manager wants a total of workers %d and thus requests %d additional worker(s) to be hired.", amount, amountToHire)
 
+
 		result, hiringErr := verifyMassHiringChoices(amountToHire, h.currentRateLimitCount(), h.slowDownCount)
 		if hiringErr != nil {
 			log.Logv(log.Info, "Manager failed to mass hire new workers because: "+hiringErr.Error())

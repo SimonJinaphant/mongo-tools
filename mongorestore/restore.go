@@ -202,6 +202,7 @@ func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
 	}
 
 	var cosmosDbCollection *cosmosdb.CosmosDBCollection
+
 	if !restore.ToolOptions.RunStockTool {
 		session, serr := restore.SessionProvider.GetSession()
 		if serr != nil {
@@ -214,6 +215,7 @@ func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
 			restore.ToolOptions.General.ShardKey,
 		)
 	}
+
 	// TODO: Define logic to handle existing CosmosDB collection
 	if !collectionExists {
 		log.Logvf(log.Info, "creating collection %v %s", intent.Namespace(), logMessageSuffix)
