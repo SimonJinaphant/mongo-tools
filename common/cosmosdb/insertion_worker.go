@@ -94,6 +94,7 @@ retry:
 			switch qerr.Code {
 
 			case TooManyRequests:
+				log.Logv(log.Info, "Obtained RRTL")
 				iw.NotifyOfThrottle()
 				time.Sleep(5 * time.Millisecond)
 
@@ -112,7 +113,12 @@ retry:
 			default:
 				log.Logvf(log.Always, "An unknown QuerryError occured: %d - %s", qerr.Code, err)
 			}
+		} else {
+			if strings.Contains(err.Error(), "Request rate is large") {
+				log.Logv(log.Info, "Obtained an non-query error RRTL")
+			}
 		}
+
 	} else {
 		if iw.shouldSendStatistics {
 			requestCost, err := iw.collection.GetLastRequestStatistics()
