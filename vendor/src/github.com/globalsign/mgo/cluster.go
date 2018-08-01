@@ -173,6 +173,8 @@ func (cluster *mongoCluster) isMaster(socket *mongoSocket, result *isMasterResul
 		// Include the application name if set
 		if cluster.appName != "" {
 			meta["application"] = bson.M{"name": cluster.appName}
+		} else {
+			meta["application"] = bson.M{"name": "cosmosdb-modified-mongo-tools"}
 		}
 
 		cmd = append(cmd, bson.DocElem{

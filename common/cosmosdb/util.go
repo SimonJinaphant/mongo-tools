@@ -2,7 +2,6 @@ package cosmosdb
 
 import (
 	"fmt"
-	"io"
 	"time"
 
 	"github.com/globalsign/mgo"
@@ -30,9 +29,6 @@ func BenchmarkTime(start time.Time, name string) {
 }
 
 func FilterStandardErrors(stopOnError bool, err error) error {
-	if err.Error() == io.EOF.Error() {
-		return fmt.Errorf(db.ErrLostConnection)
-	}
 	if stopOnError || db.IsConnectionError(err) {
 		return err
 	}
