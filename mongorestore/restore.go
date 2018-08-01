@@ -202,22 +202,26 @@ func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
 	}
 
 	var cosmosDbCollection *cosmosdb.CosmosDBCollection
+
+	if !restore.ToolOptions.RunStockTool {
+		session, serr := restore.SessionProvider.GetSession()
+		if serr != nil {
+			return serr
+		}
+
+		cosmosDbCollection = cosmosdb.NewCollection(
+			session.DB(intent.DB).C(intent.C),
+			restore.ToolOptions.General.Throughput,
+			restore.ToolOptions.General.ShardKey,
+		)
+	}
+
 	// TODO: Define logic to handle existing CosmosDB collection
 	if !collectionExists {
 		log.Logvf(log.Info, "creating collection %v %s", intent.Namespace(), logMessageSuffix)
 		log.Logvf(log.DebugHigh, "using collection options: %#v", options)
 		if !restore.ToolOptions.RunStockTool {
 			log.Logvf(log.Info, "We're targetting an Azure Cosmos DB URI; creating a custom collection...")
-			session, serr := restore.SessionProvider.GetSession()
-			if serr != nil {
-				return serr
-			}
-
-			cosmosDbCollection = cosmosdb.NewCollection(
-				session.DB(intent.DB).C(intent.C),
-				restore.ToolOptions.General.Throughput,
-				restore.ToolOptions.General.ShardKey,
-			)
 			if err := cosmosDbCollection.Deploy(); err != nil {
 				return err
 			}
@@ -327,7 +331,7 @@ func (restore *MongoRestore) RestoreCollectionToCosmosDB(cosmosDbCollection *cos
 		close(ingestionChannel)
 	}()
 
-	manager := cosmosdb.NewInsertionManager(ingestionChannel, cosmosDbCollection, restore.OutputOptions.StopOnError)
+	manager := cosmosdb.NewInsertionManager(ingestionChannel, cosmosDbCollection, restore.OutputOptions.StopOnError, restore.ToolOptions.General.DropIndex)
 	manager.SpecifySession = func() (*mgo.Session, error) {
 		return session.Copy(), nil
 	}
