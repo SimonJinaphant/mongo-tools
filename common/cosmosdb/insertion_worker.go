@@ -82,6 +82,16 @@ func (iw *InsertionWorker) Run() error {
 	}
 }
 
+func (iw *InsertionWorker) handleRequestRateTooLarge(deadline time.Time) error {
+	iw.NotifyOfThrottle()
+	time.Sleep(5 * time.Millisecond)
+
+	if time.Now().After(deadline) {
+		return fmt.Errorf("ExceedInsertDeadline-Throughput")
+	}
+	return nil
+}
+
 func (iw *InsertionWorker) insert(doc interface{}) error {
 	// Prevent the retry from re-creating the insertOp object again by explicitly storing it
 	insertOperation := mgo.CreateInsertOp(iw.collection.FullName, doc)
@@ -94,11 +104,8 @@ retry:
 			switch qerr.Code {
 
 			case TooManyRequests:
-				iw.NotifyOfThrottle()
-				time.Sleep(5 * time.Millisecond)
-
-				if time.Now().After(tooManyRequestsDeadline) {
-					return fmt.Errorf("ExceedInsertDeadline-Throughput")
+				if timeout := iw.handleRequestRateTooLarge(tooManyRequestsDeadline); timeout != nil {
+					return timeout
 				}
 				goto retry
 
@@ -111,6 +118,13 @@ retry:
 
 			default:
 				log.Logvf(log.Always, "An unknown QuerryError occured: %d - %s", qerr.Code, err)
+			}
+		} else if berr, ok := err.(*mgo.LastError); ok {
+			if berr.Code == TooManyRequests {
+				if timeout := iw.handleRequestRateTooLarge(tooManyRequestsDeadline); timeout != nil {
+					return timeout
+				}
+				goto retry
 			}
 		}
 	} else {
